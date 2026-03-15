@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
+import torch.optim as optim
 
 
 class backbone(nn.Module):
@@ -155,19 +156,15 @@ class ConvLSTMCell(nn.Module):
 
 class ConvLSTM(nn.Module):
     """
-    多层 ConvLSTM 网络
-    支持多层堆叠，适用于视频等时空序列数据
+    单层 ConvLSTM 网络
+    适用于视频等时空序列数据
     """
-    def __init__(self, input_dim, hidden_dim, kernel_size=3, num_layers=1):
+    def __init__(self, input_dim, hidden_dim, kernel_size=3):
         super().__init__()
-        self.num_layers = num_layers
+        self.hidden_dim = hidden_dim
         
-        cell_list = []
-        for i in range(num_layers):
-            cur_input_dim = input_dim if i == 0 else hidden_dim
-            cell_list.append(ConvLSTMCell(cur_input_dim, hidden_dim, kernel_size))
-        
-        self.cell_list = nn.ModuleList(cell_list)
+        # 单层 ConvLSTM Cell
+        self.cell = ConvLSTMCell(input_dim, hidden_dim, kernel_size)
     
     def forward(self, x, hidden_state=None):
         """
@@ -175,41 +172,31 @@ class ConvLSTM(nn.Module):
         
         参数:
             x: 输入序列 (batch_size, seq_len, channels, height, width)
-            hidden_state: 初始隐藏状态，None则自动初始化
+            hidden_state: 初始隐藏状态 (h, c)，None则自动初始化
         
         返回:
-            layer_output: 最后一层的输出 (batch_size, seq_len, hidden_dim, height, width)
-            last_state_list: 每层的最终状态列表
+            output: 输出 (batch_size, seq_len, hidden_dim, height, width)
+            last_state: 最终状态 (h, c)
         """
         batch_size, seq_len, _, height, width = x.size()
         device = x.device
         
         # 初始化隐藏状态
         if hidden_state is None:
-            hidden_state = []
-            for i in range(self.num_layers):
-                h, c = self.cell_list[i].init_hidden(batch_size, (height, width), device)
-                hidden_state.append((h, c))
+            h, c = self.cell.init_hidden(batch_size, (height, width), device)
+        else:
+            h, c = hidden_state
         
-        # 逐层处理
-        cur_layer_input = x
-        last_state_list = []
+        # 遍历时间步
+        output_inner = []
+        for t in range(seq_len):
+            h, c = self.cell(x[:, t], h, c)
+            output_inner.append(h)
         
-        for layer_idx in range(self.num_layers):
-            h, c = hidden_state[layer_idx]
-            output_inner = []
-            
-            # 遍历时间步
-            for t in range(seq_len):
-                h, c = self.cell_list[layer_idx](cur_layer_input[:, t], h, c)
-                output_inner.append(h)
-            
-            # 堆叠该层所有时间步的输出
-            layer_output = torch.stack(output_inner, dim=1)
-            cur_layer_input = layer_output  # 作为下一层的输入
-            last_state_list.append((h, c))
+        # 堆叠所有时间步的输出
+        output = torch.stack(output_inner, dim=1)
         
-        return layer_output, last_state_list
+        return output, (h, c)
 
 
 class VideoCornerDetectionModel(nn.Module):
@@ -217,7 +204,7 @@ class VideoCornerDetectionModel(nn.Module):
     视频角点检测模型
     结合 CNN 特征提取和 ConvLSTM 时序建模
     """
-    def __init__(self, H, W, hidden_dim=64, num_layers=2):
+    def __init__(self, H, W, hidden_dim=64):
         super().__init__()
         self.H = H
         self.W = W
@@ -228,12 +215,11 @@ class VideoCornerDetectionModel(nn.Module):
         # 特征投影层（将 backbone 输出映射到 ConvLSTM 输入维度）
         self.feature_proj = nn.Conv2d(256, hidden_dim, kernel_size=1)
         
-        # ConvLSTM 时序建模
+        # ConvLSTM 时序建模（单层）
         self.convlstm = ConvLSTM(
             input_dim=hidden_dim,
             hidden_dim=hidden_dim,
-            kernel_size=3,
-            num_layers=num_layers
+            kernel_size=3
         )
         
         # 特征反投影层（将 ConvLSTM 输出映射回 256 通道）
@@ -298,51 +284,10 @@ def total_loss(output, target, lambda_temporal=0.2):
     """总损失 = 检测损失 + 时序平滑损失"""
     return detection_loss(output, target) + lambda_temporal * temporal_loss(output)
 
-
-if __name__ == '__main__':
-    # 测试单帧模型
-    print("=" * 60)
-    print("测试单帧角点检测模型")
-    print("=" * 60)
-    model = CornerDetectionModel(224, 224)
-    input_tensor = torch.randn(1, 3, 224, 224)
-    output = model(input_tensor)
-    print(f"输入形状: {input_tensor.shape}")
-    print(f"输出形状: {output.shape}")
-    print()
+class criterion(nn.Module):
+    def __init__(self, lambda_temporal=0.2):
+        super().__init__()
+        self.lambda_temporal = lambda_temporal
     
-    # 测试 ConvLSTM Cell
-    print("=" * 60)
-    print("测试 ConvLSTM Cell")
-    print("=" * 60)
-    cell = ConvLSTMCell(input_dim=64, hidden_dim=64)
-    x = torch.randn(2, 64, 32, 32)
-    h = torch.randn(2, 64, 32, 32)
-    c = torch.randn(2, 64, 32, 32)
-    h_next, c_next = cell(x, h, c)
-    print(f"输入 x 形状: {x.shape}")
-    print(f"输出 h_next 形状: {h_next.shape}")
-    print(f"输出 c_next 形状: {c_next.shape}")
-    print()
-    
-    # 测试多层 ConvLSTM
-    print("=" * 60)
-    print("测试多层 ConvLSTM")
-    print("=" * 60)
-    convlstm = ConvLSTM(input_dim=64, hidden_dim=64, kernel_size=3, num_layers=2)
-    video = torch.randn(2, 10, 64, 32, 32)  # (batch, seq, channels, H, W)
-    output, states = convlstm(video)
-    print(f"输入形状: {video.shape}")
-    print(f"输出形状: {output.shape}")
-    print(f"层数: {len(states)}")
-    print()
-    
-    # 测试视频角点检测模型
-    print("=" * 60)
-    print("测试视频角点检测模型")
-    print("=" * 60)
-    video_model = VideoCornerDetectionModel(224, 224, hidden_dim=64, num_layers=2)
-    video_input = torch.randn(1, 5, 3, 224, 224)  # (batch, seq, C, H, W)
-    video_output = video_model(video_input)
-    print(f"输入形状: {video_input.shape}")
-    print(f"输出形状: {video_output.shape}")
+    def forward(self, output, target):
+        return total_loss(output, target, self.lambda_temporal)
