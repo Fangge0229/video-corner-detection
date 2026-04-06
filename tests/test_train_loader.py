@@ -80,6 +80,49 @@ def _build_video_corner_labels_dataset(root: Path) -> Path:
     return root
 
 
+def _build_video_corner_labels_dataset_with_keypoint(
+    root: Path,
+    *,
+    image_size=(64, 64),
+    keypoint=(16.0, 20.0),
+) -> Path:
+    labels_root = root / "video_corner_labels"
+    clip_id = "clip_000"
+    frame_entries = []
+    annotations = []
+
+    for frame_idx in range(4):
+        image_relpath = f"{clip_id}/rgb/{frame_idx:06d}.png"
+        _write_png(labels_root / image_relpath, size=image_size)
+        frame_entries.append(
+            {
+                "frame_idx": frame_idx,
+                "image_path": image_relpath,
+            }
+        )
+        corners_per_class = [[] for _ in range(8)]
+        if frame_idx == 0:
+            corners_per_class[0] = [[keypoint[0], keypoint[1]]]
+        annotations.append(
+            {
+                "clip_id": clip_id,
+                "frame_idx": frame_idx,
+                "corners_per_class": corners_per_class,
+            }
+        )
+
+    labels_root.mkdir(parents=True, exist_ok=True)
+    (labels_root / "clips.json").write_text(
+        json.dumps({"clips": [{"clip_id": clip_id, "frames": frame_entries}]}, indent=2),
+        encoding="utf-8",
+    )
+    (labels_root / "annotations.json").write_text(
+        json.dumps({"annotations": annotations}, indent=2),
+        encoding="utf-8",
+    )
+    return root
+
+
 def _write_annotations_json(root: Path, payload) -> None:
     labels_root = root / "video_corner_labels"
     labels_root.mkdir(parents=True, exist_ok=True)
@@ -368,6 +411,72 @@ def test_prefers_video_corner_labels_collate_fn_batches_image_ids_once(tmp_path)
         [0, 1, 2, 3],
         [0, 1, 2, 3],
     ]
+
+
+def test_create_video_data_loader_batches_sequence_samples(tmp_path):
+    dataset_root = _build_video_corner_labels_dataset(tmp_path)
+
+    loader = train_loader.create_video_data_loader(
+        str(dataset_root),
+        batch_size=2,
+        num_workers=0,
+        phase="val",
+        seq_len=4,
+        stride=1,
+    )
+    batch = next(iter(loader))
+
+    assert batch["images"].shape == (2, 4, 3, 256, 256)
+    assert batch["heatmaps"].shape == (2, 4, 8, 256, 256)
+    assert batch["corners_list"][0][0][0] == []
+    assert batch["image_ids"] == [[0, 1, 2, 3], [0, 1, 2, 3]]
+    assert batch["image_paths"][0][0].endswith("clip_000/rgb/000000.png")
+    assert batch["clip_ids"] == ["clip_000", "clip_001"]
+    assert batch["frame_indices"] == [[0, 1, 2, 3], [0, 1, 2, 3]]
+    assert batch["source_types"] == [["video_corner_labels"] * 4, ["video_corner_labels"] * 4]
+
+
+def test_heatmap_generation_respects_scaled_keypoints(tmp_path):
+    dataset_root = _build_video_corner_labels_dataset_with_keypoint(tmp_path)
+
+    loader = train_loader.create_video_data_loader(
+        str(dataset_root),
+        batch_size=1,
+        num_workers=0,
+        phase="val",
+        seq_len=4,
+        stride=1,
+    )
+    batch = next(iter(loader))
+
+    heatmap = batch["heatmaps"][0, 0, 0]
+    peak_value = heatmap.max().item()
+    peak_y, peak_x = divmod(int(heatmap.argmax().item()), heatmap.shape[-1])
+
+    assert (peak_y, peak_x) == (80, 64)
+    assert peak_value == pytest.approx(1.0, abs=1e-6)
+    assert heatmap[80, 64] == pytest.approx(1.0, abs=1e-6)
+    assert heatmap[79, 64] < peak_value
+
+
+def test_create_bop_data_loader_supports_legacy_scene_dir(tmp_path):
+    dataset_root = _build_bop_dataset(tmp_path, frame_count=4)
+    scene_dir = dataset_root / "train_pbr" / "000001"
+
+    loader = train_loader.create_bop_data_loader(
+        str(scene_dir),
+        batch_size=1,
+        num_workers=0,
+        phase="val",
+        seq_len=4,
+        stride=1,
+    )
+    batch = next(iter(loader))
+
+    assert batch["images"].shape == (1, 4, 3, 256, 256)
+    assert batch["heatmaps"].shape == (1, 4, 8, 256, 256)
+    assert batch["image_ids"] == [[0, 1, 2, 3]]
+    assert batch["image_paths"][0][0].endswith("train_pbr/000001/rgb/000000.png")
 
 
 def test_bop_root_discovers_multiple_scenes(tmp_path):

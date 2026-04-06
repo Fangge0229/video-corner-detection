@@ -702,11 +702,11 @@ def collate_fn(batch):
     }
 
 
-def create_bop_data_loader(scene_dir, batch_size=2, num_workers=0, phase='train', seq_len=4, stride=1):
+def create_video_data_loader(dataset_root, batch_size=2, num_workers=0, phase='train', seq_len=4, stride=1):
     transform = _default_sequence_transform()
 
-    dataset = BOPCornerDataset(
-        scene_dir=scene_dir,
+    dataset = VideoCornerDataset(
+        dataset_root=dataset_root,
         seq_len=seq_len,
         stride=stride,
         transform=transform,
@@ -722,3 +722,61 @@ def create_bop_data_loader(scene_dir, batch_size=2, num_workers=0, phase='train'
     )
 
     return data_loader
+
+
+def create_bop_data_loader(scene_dir, batch_size=2, num_workers=0, phase='train', seq_len=4, stride=1):
+    scene_gt_coco_path = os.path.join(scene_dir, 'scene_gt_coco.json')
+    scene_gt_path = os.path.join(scene_dir, 'scene_gt.json')
+    scene_camera_path = os.path.join(scene_dir, 'scene_camera.json')
+
+    if os.path.isfile(scene_gt_coco_path):
+        transform = _default_sequence_transform()
+        dataset = BOPCornerDataset(
+            scene_dir=scene_dir,
+            seq_len=seq_len,
+            stride=stride,
+            transform=transform,
+            phase=phase
+        )
+    elif os.path.isfile(scene_gt_path) and os.path.isfile(scene_camera_path):
+        dataset_root = os.path.dirname(os.path.dirname(scene_dir.rstrip(os.sep)))
+        models_root = os.path.join(dataset_root, 'models')
+        model_corner_cache = {}
+        if os.path.isdir(models_root):
+            for file_name in sorted(os.listdir(models_root)):
+                if not file_name.endswith('.ply'):
+                    continue
+                match = re.search(r'(\d+)', file_name)
+                if not match:
+                    continue
+                obj_id = int(match.group(1))
+                model_corner_cache[obj_id] = load_ply_corners(os.path.join(models_root, file_name))
+
+        clip = _load_scene_records(scene_dir, model_corner_cache)
+        dataset = VideoCornerDataset.__new__(VideoCornerDataset)
+        dataset.dataset_root = dataset_root
+        dataset.seq_len = seq_len
+        dataset.stride = stride
+        dataset.transform = _default_sequence_transform()
+        dataset.phase = phase
+        dataset.max_corners = 32
+        dataset.clips = [clip] if clip.get('frames') else []
+        dataset.source_type = dataset.clips[0]['source_type'] if dataset.clips else None
+        dataset.sequence_starts = dataset._build_windows() if dataset.clips else []
+    else:
+        return create_video_data_loader(
+            dataset_root=scene_dir,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            phase=phase,
+            seq_len=seq_len,
+            stride=stride,
+        )
+
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=(phase == 'train'),
+        num_workers=num_workers,
+        collate_fn=collate_fn
+    )
