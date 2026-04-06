@@ -8,6 +8,153 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 
 
+def _default_sequence_transform():
+    return transforms.Compose([
+        transforms.Resize((256, 256)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225])
+    ])
+
+
+def _has_video_corner_labels(dataset_root):
+    clips_path = os.path.join(dataset_root, 'video_corner_labels', 'clips.json')
+    return os.path.isfile(clips_path)
+
+
+def _normalize_annotation_to_corners(annotation):
+    if not isinstance(annotation, dict):
+        raise ValueError("video_corner_labels annotation must be an object")
+
+    if 'corners_per_class' in annotation:
+        corners_per_class = annotation['corners_per_class']
+        if not isinstance(corners_per_class, list) or len(corners_per_class) != 8:
+            raise ValueError("video_corner_labels annotation must contain 8 corner classes")
+
+        normalized = [[] for _ in range(8)]
+        for class_id, corners in enumerate(corners_per_class):
+            if corners is None:
+                continue
+            if not isinstance(corners, list):
+                raise ValueError("Each class in corners_per_class must be a list")
+            for corner in corners:
+                if not isinstance(corner, (list, tuple)) or len(corner) < 2:
+                    raise ValueError("Each corner must be an [x, y] pair")
+                x, y = corner[:2]
+                normalized[class_id].append([float(x), float(y)])
+        return normalized
+
+    if 'keypoints' in annotation:
+        keypoints = annotation['keypoints']
+        if not isinstance(keypoints, list):
+            raise ValueError("annotation keypoints must be a list")
+
+        normalized = [[] for _ in range(8)]
+        for class_id in range(8):
+            offset = class_id * 3
+            if offset + 2 >= len(keypoints):
+                break
+            x, y, v = keypoints[offset:offset + 3]
+            if v > 0:
+                normalized[class_id].append([float(x), float(y)])
+        return normalized
+
+    if 'corners' in annotation:
+        corners = annotation['corners']
+        if not isinstance(corners, list) or len(corners) != 8:
+            raise ValueError("video_corner_labels annotation corners must contain 8 classes")
+
+        normalized = [[] for _ in range(8)]
+        for class_id, class_corners in enumerate(corners):
+            if class_corners is None:
+                continue
+            if not isinstance(class_corners, list):
+                raise ValueError("Each class in corners must be a list")
+            for corner in class_corners:
+                if not isinstance(corner, (list, tuple)) or len(corner) < 2:
+                    raise ValueError("Each corner must be an [x, y] pair")
+                x, y = corner[:2]
+                normalized[class_id].append([float(x), float(y)])
+        return normalized
+
+    raise ValueError("video_corner_labels annotation must contain corners_per_class, corners, or keypoints")
+
+
+def _load_video_corner_label_clips(dataset_root):
+    clips_path = os.path.join(dataset_root, 'video_corner_labels', 'clips.json')
+    with open(clips_path, 'r', encoding='utf-8') as f:
+        clips_data = json.load(f)
+
+    if not isinstance(clips_data, dict) or 'clips' not in clips_data or not isinstance(clips_data['clips'], list):
+        raise ValueError("video_corner_labels/clips.json must contain a 'clips' list")
+
+    annotations_path = os.path.join(dataset_root, 'video_corner_labels', 'annotations.json')
+    annotations_by_clip_frame = {}
+    if os.path.isfile(annotations_path):
+        with open(annotations_path, 'r', encoding='utf-8') as f:
+            annotations_data = json.load(f)
+        if not isinstance(annotations_data, dict) or 'annotations' not in annotations_data or not isinstance(annotations_data['annotations'], list):
+            raise ValueError("video_corner_labels/annotations.json must contain an 'annotations' list")
+        annotations = annotations_data['annotations']
+        for annotation in annotations:
+            if not isinstance(annotation, dict):
+                raise ValueError("Each annotation entry must be an object")
+            clip_id = annotation.get('clip_id')
+            frame_idx = annotation.get('frame_idx')
+            if clip_id is None or frame_idx is None:
+                raise ValueError("Each annotation entry must contain clip_id and frame_idx")
+            annotations_by_clip_frame[(clip_id, frame_idx)] = _normalize_annotation_to_corners(annotation)
+
+    clips = []
+    for clip_idx, raw_clip in enumerate(clips_data['clips']):
+        if not isinstance(raw_clip, dict):
+            raise ValueError("Each clip entry in video_corner_labels/clips.json must be an object")
+
+        if 'frames' not in raw_clip or not isinstance(raw_clip['frames'], list):
+            raise ValueError(f"Clip entry {clip_idx} in video_corner_labels/clips.json must contain a 'frames' list")
+
+        clip_id = raw_clip.get('clip_id', f'clip_{clip_idx:03d}')
+        normalized_frames = []
+        for frame_idx, frame in enumerate(raw_clip['frames']):
+            if isinstance(frame, str):
+                frame = {'image_path': frame}
+            elif not isinstance(frame, dict):
+                raise ValueError(f"Frame entry {frame_idx} in clip '{clip_id}' must be a string or object")
+
+            image_path = frame.get('image_path') or frame.get('file_name') or frame.get('path')
+            if not image_path:
+                raise ValueError(f"Frame entry {frame_idx} in clip '{clip_id}' must contain an image path")
+
+            resolved_frame_idx = frame.get('frame_idx', frame_idx)
+            annotation = frame.get('annotation')
+            image_id = frame.get('image_id')
+            if annotation is not None:
+                corners_list = _normalize_annotation_to_corners(annotation)
+                if image_id is None:
+                    image_id = annotation.get('image_id')
+            else:
+                corners_list = annotations_by_clip_frame.get((clip_id, resolved_frame_idx), [[] for _ in range(8)])
+                if image_id is None:
+                    image_id = resolved_frame_idx
+
+            normalized_frames.append({
+                'frame_idx': resolved_frame_idx,
+                'image_id': image_id,
+                'image_path': image_path,
+                'corners_list': corners_list,
+                'source_type': 'video_corner_labels',
+            })
+
+        normalized_frames.sort(key=lambda item: item['frame_idx'])
+        clips.append({
+            'clip_id': clip_id,
+            'frames': normalized_frames,
+            'source_type': 'video_corner_labels',
+        })
+
+    return clips
+
+
 def corners_to_heatmap(corners_list, height, width, sigma=2.0, num_classes=8):
     heatmap = torch.zeros((num_classes, height, width), dtype=torch.float32)
     xx, yy = torch.meshgrid(torch.arange(width), torch.arange(height), indexing='xy')
@@ -33,7 +180,7 @@ class VideoCornerDataset(Dataset):
         self.dataset_root = dataset_root
         self.seq_len = seq_len
         self.stride = stride
-        self.transform = transform
+        self.transform = transform or _default_sequence_transform()
         self.phase = phase
         self.max_corners = 32
 
@@ -42,46 +189,13 @@ class VideoCornerDataset(Dataset):
         print(f"找到 {len(self.clips)} 个 clips，可构造 {len(self.sequence_starts)} 个训练样本 ({phase}阶段)")
 
     def _load_clips(self):
-        clips_path = os.path.join(self.dataset_root, 'video_corner_labels', 'clips.json')
-        with open(clips_path, 'r', encoding='utf-8') as f:
-            clips_data = json.load(f)
+        if _has_video_corner_labels(self.dataset_root):
+            clips = _load_video_corner_label_clips(self.dataset_root)
+            return [clip for clip in clips if len(clip['frames']) >= self.seq_len]
 
-        if not isinstance(clips_data, dict) or 'clips' not in clips_data or not isinstance(clips_data['clips'], list):
-            raise ValueError("video_corner_labels/clips.json must contain a 'clips' list")
-
-        raw_clips = clips_data['clips']
-        clips = []
-        for clip_idx, raw_clip in enumerate(raw_clips):
-            if not isinstance(raw_clip, dict):
-                raise ValueError("Each clip entry in video_corner_labels/clips.json must be an object")
-
-            if 'frames' not in raw_clip or not isinstance(raw_clip['frames'], list):
-                raise ValueError(f"Clip entry {clip_idx} in video_corner_labels/clips.json must contain a 'frames' list")
-
-            frames = raw_clip['frames']
-            normalized_frames = []
-            for frame_idx, frame in enumerate(frames):
-                if isinstance(frame, str):
-                    frame = {'image_path': frame}
-                elif not isinstance(frame, dict):
-                    raise ValueError(f"Frame entry {frame_idx} in clip '{raw_clip.get('clip_id', f'clip_{clip_idx:03d}')}' must be a string or object")
-
-                image_path = frame.get('image_path') or frame.get('file_name') or frame.get('path')
-                if not image_path:
-                    raise ValueError(f"Frame entry {frame_idx} in clip '{raw_clip.get('clip_id', f'clip_{clip_idx:03d}')}' must contain an image path")
-
-                normalized_frames.append({
-                    'frame_idx': frame.get('frame_idx', frame_idx),
-                    'image_path': image_path,
-                })
-
-            clips.append({
-                'clip_id': raw_clip.get('clip_id', f'clip_{clip_idx:03d}'),
-                'frames': normalized_frames,
-                'source_type': 'video_corner_labels',
-            })
-
-        return clips
+        raise FileNotFoundError(
+            "video_corner_labels dataset not found; BOP fallback is not implemented in this task"
+        )
 
     def _build_windows(self):
         windows = []
@@ -107,10 +221,60 @@ class VideoCornerDataset(Dataset):
         clip = self.clips[window['clip_index']]
         frames = clip['frames'][window['start_idx']:window['start_idx'] + self.seq_len]
 
+        seq_images = []
+        seq_heatmaps = []
+        seq_corners_list = []
+        seq_source_types = []
+        seq_image_paths = []
+        seq_frame_indices = []
+        seq_image_ids = []
+
+        for frame in frames:
+            image_path = frame['image_path']
+            if not os.path.isabs(image_path):
+                image_path = os.path.join(self.dataset_root, 'video_corner_labels', image_path)
+
+            image = Image.open(image_path).convert('RGB')
+            orig_w, orig_h = image.size
+
+            corners_list = frame.get('corners_list', [[] for _ in range(8)])
+
+            if self.transform:
+                image = self.transform(image)
+            else:
+                image = transforms.ToTensor()(image)
+
+            if not torch.is_tensor(image):
+                image = transforms.ToTensor()(image)
+
+            target_h, target_w = image.shape[1], image.shape[2]
+            scale_x = float(target_w) / float(orig_w)
+            scale_y = float(target_h) / float(orig_h)
+
+            scaled_corners_list = [[] for _ in range(8)]
+            for class_id in range(8):
+                for x, y in corners_list[class_id]:
+                    scaled_corners_list[class_id].append([x * scale_x, y * scale_y])
+
+            heatmap = corners_to_heatmap(scaled_corners_list, target_h, target_w, num_classes=8)
+
+            seq_images.append(image)
+            seq_heatmaps.append(heatmap)
+            seq_corners_list.append(scaled_corners_list)
+            seq_source_types.append(frame.get('source_type', clip['source_type']))
+            seq_image_paths.append(image_path)
+            seq_frame_indices.append(frame['frame_idx'])
+            seq_image_ids.append(frame.get('image_id', frame['frame_idx']))
+
         return {
             'clip_id': clip['clip_id'],
-            'frames': frames,
-            'source_type': clip['source_type'],
+            'images': torch.stack(seq_images, dim=0),
+            'heatmaps': torch.stack(seq_heatmaps, dim=0),
+            'corners_list': seq_corners_list,
+            'source_types': seq_source_types,
+            'image_paths': seq_image_paths,
+            'frame_indices': seq_frame_indices,
+            'image_ids': seq_image_ids,
         }
 
 
@@ -223,28 +387,35 @@ def collate_fn(batch):
     heatmaps = []
     image_ids = []
     image_paths = []
+    corners_list = []
+    source_types = []
+    clip_ids = []
+    frame_indices = []
 
     for item in batch:
         images.append(item['images'])
         heatmaps.append(item['heatmaps'])
-        image_ids.append(item['image_ids'])
+        image_ids.append(item.get('image_ids'))
         image_paths.append(item['image_paths'])
+        corners_list.append(item.get('corners_list'))
+        source_types.append(item.get('source_types'))
+        clip_ids.append(item.get('clip_id'))
+        frame_indices.append(item.get('frame_indices'))
 
     return {
         'images': torch.stack(images, dim=0),
         'heatmaps': torch.stack(heatmaps, dim=0),
         'image_ids': image_ids,
-        'image_paths': image_paths
+        'image_paths': image_paths,
+        'corners_list': corners_list,
+        'source_types': source_types,
+        'clip_ids': clip_ids,
+        'frame_indices': frame_indices,
     }
 
 
 def create_bop_data_loader(scene_dir, batch_size=2, num_workers=0, phase='train', seq_len=4, stride=1):
-    transform = transforms.Compose([
-        transforms.Resize((256, 256)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                             std=[0.229, 0.224, 0.225])
-    ])
+    transform = _default_sequence_transform()
 
     dataset = BOPCornerDataset(
         scene_dir=scene_dir,
