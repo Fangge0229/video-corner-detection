@@ -2,18 +2,36 @@ import json
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 from PIL import Image
+import torch
 from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import train_loader
 from train_loader import VideoCornerDataset, collate_fn
 
 
 def _write_png(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGB", (2, 2), color=(255, 255, 255)).save(path)
+
+
+def _write_ascii_ply(path: Path, vertices) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    header = [
+        "ply",
+        "format ascii 1.0",
+        f"element vertex {len(vertices)}",
+        "property float x",
+        "property float y",
+        "property float z",
+        "end_header",
+    ]
+    body = [f"{x} {y} {z}" for x, y, z in vertices]
+    path.write_text("\n".join(header + body) + "\n", encoding="utf-8")
 
 
 def _build_video_corner_labels_dataset(root: Path) -> Path:
@@ -102,6 +120,70 @@ def _write_bop_scene(root: Path, frame_count: int) -> None:
         json.dumps({"images": images, "annotations": annotations}, indent=2),
         encoding="utf-8",
     )
+
+
+def _build_bop_dataset(root: Path, frame_count: int = 4, low_visibility_frames=None) -> Path:
+    low_visibility_frames = set(low_visibility_frames or set())
+    dataset_root = root
+
+    models_root = dataset_root / "models"
+    _write_ascii_ply(
+        models_root / "obj_000001.ply",
+        vertices=[
+            (-1.0, -1.0, -1.0),
+            (1.0, -1.0, -1.0),
+            (-1.0, 1.0, -1.0),
+            (1.0, 1.0, -1.0),
+            (-1.0, -1.0, 1.0),
+            (1.0, -1.0, 1.0),
+            (-1.0, 1.0, 1.0),
+            (1.0, 1.0, 1.0),
+        ],
+    )
+
+    scene_root = dataset_root / "train_pbr" / "000001"
+    rgb_root = scene_root / "rgb"
+    rgb_root.mkdir(parents=True, exist_ok=True)
+
+    scene_gt = {}
+    scene_camera = {}
+    scene_gt_info = {}
+    for image_id in range(frame_count):
+        file_name = f"{image_id:06d}.png"
+        _write_png(rgb_root / file_name)
+        scene_gt[str(image_id)] = [
+            {
+                "obj_id": 1,
+                "cam_R_m2c": [1.0, 0.0, 0.0,
+                              0.0, 1.0, 0.0,
+                              0.0, 0.0, 1.0],
+                "cam_t_m2c": [0.0, 0.0, 100.0],
+            }
+        ]
+        scene_camera[str(image_id)] = {
+            "cam_K": [100.0, 0.0, 32.0,
+                      0.0, 100.0, 32.0,
+                      0.0, 0.0, 1.0],
+        }
+        scene_gt_info[str(image_id)] = [
+            {
+                "visib_fract": 0.0 if image_id in low_visibility_frames else 1.0,
+            }
+        ]
+
+    (scene_root / "scene_gt.json").write_text(
+        json.dumps(scene_gt, indent=2),
+        encoding="utf-8",
+    )
+    (scene_root / "scene_camera.json").write_text(
+        json.dumps(scene_camera, indent=2),
+        encoding="utf-8",
+    )
+    (scene_root / "scene_gt_info.json").write_text(
+        json.dumps(scene_gt_info, indent=2),
+        encoding="utf-8",
+    )
+    return dataset_root
 
 
 def test_dataset_root_scans_multiple_clips_and_builds_windows(tmp_path):
@@ -238,3 +320,115 @@ def test_prefers_video_corner_labels_collate_fn_batches_image_ids_once(tmp_path)
         [0, 1, 2, 3],
         [0, 1, 2, 3],
     ]
+
+
+def test_falls_back_to_bop_when_video_corner_labels_missing(tmp_path):
+    dataset_root = _build_bop_dataset(tmp_path, frame_count=4)
+
+    pytest.xfail("Task 4: BOP fallback loader is not implemented yet")
+
+    dataset = VideoCornerDataset(str(dataset_root), seq_len=4, stride=1, phase="train")
+
+    assert dataset.source_type == "bop_fallback"
+    sample = dataset[0]
+    assert sample["heatmaps"].shape == (4, 8, 256, 256)
+    assert sample["source_types"] == ["bop_fallback"] * 4
+
+
+def test_bop_visibility_allows_empty_heatmap_for_low_visibility_frame(tmp_path):
+    dataset_root = _build_bop_dataset(tmp_path, frame_count=4, low_visibility_frames={1})
+
+    pytest.xfail("Task 4: BOP fallback loader is not implemented yet")
+
+    dataset = VideoCornerDataset(str(dataset_root), seq_len=4, stride=1, phase="train")
+
+    sample = dataset[0]
+    assert torch.count_nonzero(sample["heatmaps"][1]) == 0
+
+
+def test_projected_points_outside_image_are_dropped(tmp_path):
+    corners_2d, visibility = train_loader.project_corners_to_2d(
+        corners_3d=np.array(
+            [
+                [0, 0, 1],
+                [10, 0, 1],
+                [0, 10, 1],
+                [10, 10, 1],
+                [0, 0, 2],
+                [10, 0, 2],
+                [0, 10, 2],
+                [10, 10, 2],
+            ],
+            dtype=np.float32,
+        ),
+        R=np.eye(3, dtype=np.float32),
+        t=np.array([10000, 10000, 0], dtype=np.float32),
+        K=np.eye(3, dtype=np.float32),
+        width=64,
+        height=64,
+    )
+
+    assert visibility == [0] * 8
+    assert isinstance(corners_2d, np.ndarray)
+    assert corners_2d.shape == (8, 2)
+
+
+def test_load_ply_corners_rejects_malformed_or_unsupported_ply(tmp_path):
+    malformed_ply = tmp_path / "malformed.ply"
+    malformed_ply.write_text(
+        "\n".join(
+            [
+                "ply",
+                "format binary_little_endian 1.0",
+                "element vertex 1",
+                "property float x",
+                "property float y",
+                "property float z",
+                "end_header",
+                "0 0 0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Unsupported PLY format"):
+        train_loader.load_ply_corners(malformed_ply)
+
+    non_utf8_ply = tmp_path / "non_utf8.ply"
+    non_utf8_ply.write_bytes(
+        b"ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nend_header\n"
+        b"\xff\xfe\xfd\n"
+    )
+
+    with pytest.raises(ValueError, match="Unable to read PLY file"):
+        train_loader.load_ply_corners(non_utf8_ply)
+
+
+def test_project_corners_to_2d_marks_behind_camera_points_invisible():
+    corners_2d, visibility = train_loader.project_corners_to_2d(
+        corners_3d=np.array([[0.0, 0.0, -1.0], [1.0, 1.0, 1.0]], dtype=np.float32),
+        R=np.eye(3, dtype=np.float32),
+        t=np.zeros(3, dtype=np.float32),
+        K=np.eye(3, dtype=np.float32),
+        width=64,
+        height=64,
+    )
+
+    assert visibility == [0, 1]
+    assert np.isnan(corners_2d[0]).all()
+    assert np.isfinite(corners_2d[1]).all()
+
+
+def test_frame_is_visible_uses_dict_list_and_threshold_behavior():
+    assert train_loader._frame_is_visible({"visib_fract": 0.5}, min_visib_fract=0.1) is True
+    assert train_loader._frame_is_visible({"visib_fract": 0.1}, min_visib_fract=0.1) is False
+    assert train_loader._frame_is_visible({"visib_fract": 0.01}, min_visib_fract=0.1) is False
+    assert train_loader._frame_is_visible(
+        [{"visib_fract": 0.0}, {"visib_fract": 0.2}],
+        min_visib_fract=0.1,
+    ) is True
+    assert train_loader._frame_is_visible(
+        [{"visib_fract": 0.0}, {"visib_fract": 0.01}],
+        min_visib_fract=0.1,
+    ) is False

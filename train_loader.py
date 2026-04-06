@@ -172,6 +172,129 @@ def corners_to_heatmap(corners_list, height, width, sigma=2.0, num_classes=8):
     return heatmap
 
 
+def load_ply_corners(model_path):
+    try:
+        with open(model_path, 'r', encoding='utf-8', errors='strict') as f:
+            lines = f.readlines()
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"Unable to read PLY file as UTF-8 text: {model_path}") from exc
+    except OSError as exc:
+        raise ValueError(f"Unable to read PLY file: {model_path}") from exc
+
+    vertex_count = None
+    ply_format = None
+    header_end_index = None
+
+    for line_index, raw_line in enumerate(lines):
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        if line == 'ply':
+            continue
+        if line.startswith('format '):
+            ply_format = line.split(maxsplit=2)[1]
+            if ply_format != 'ascii':
+                raise ValueError(f"Unsupported PLY format '{ply_format}' in {model_path}")
+            continue
+        if line.startswith('element vertex '):
+            try:
+                vertex_count = int(line.split()[-1])
+            except ValueError as exc:
+                raise ValueError(f"Invalid vertex count in PLY file: {model_path}") from exc
+            continue
+        if line == 'end_header':
+            header_end_index = line_index + 1
+            break
+
+    if header_end_index is None:
+        raise ValueError(f"PLY file is missing end_header: {model_path}")
+    if vertex_count is None:
+        raise ValueError(f"PLY file is missing vertex element count: {model_path}")
+
+    vertices = []
+    for raw_line in lines[header_end_index:]:
+        if len(vertices) >= vertex_count:
+            break
+
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        try:
+            vertices.append([float(parts[0]), float(parts[1]), float(parts[2])])
+        except ValueError as exc:
+            raise ValueError(f"Invalid vertex coordinates in PLY file: {model_path}") from exc
+
+    if len(vertices) != vertex_count:
+        raise ValueError(f"PLY file ended before reading {vertex_count} vertices: {model_path}")
+
+    vertices = np.asarray(vertices, dtype=np.float32)
+    mins = vertices.min(axis=0)
+    maxs = vertices.max(axis=0)
+
+    return np.asarray([
+        [mins[0], mins[1], mins[2]],
+        [maxs[0], mins[1], mins[2]],
+        [mins[0], maxs[1], mins[2]],
+        [maxs[0], maxs[1], mins[2]],
+        [mins[0], mins[1], maxs[2]],
+        [maxs[0], mins[1], maxs[2]],
+        [mins[0], maxs[1], maxs[2]],
+        [maxs[0], maxs[1], maxs[2]],
+    ], dtype=np.float32)
+
+
+def project_corners_to_2d(corners_3d, R, t, K, width, height):
+    corners_3d = np.asarray(corners_3d, dtype=np.float32)
+    R = np.asarray(R, dtype=np.float32)
+    t = np.asarray(t, dtype=np.float32).reshape(3)
+    K = np.asarray(K, dtype=np.float32)
+
+    cam_points = (R @ corners_3d.T).T + t.reshape(1, 3)
+    projected = np.full((corners_3d.shape[0], 2), np.nan, dtype=np.float32)
+    visibility = []
+
+    for idx, cam_point in enumerate(cam_points):
+        z = float(cam_point[2])
+        if z <= 0:
+            visibility.append(0)
+            continue
+
+        pixel_h = K @ cam_point
+        x = float(pixel_h[0] / pixel_h[2])
+        y = float(pixel_h[1] / pixel_h[2])
+        projected[idx] = [x, y]
+
+        is_visible = 0 <= x < width and 0 <= y < height
+        visibility.append(1 if is_visible else 0)
+
+    return projected, visibility
+
+
+def _frame_is_visible(scene_gt_info_entry, min_visib_fract=1e-6):
+    if scene_gt_info_entry is None:
+        return False
+
+    if isinstance(scene_gt_info_entry, (list, tuple)):
+        return any(_frame_is_visible(entry, min_visib_fract=min_visib_fract) for entry in scene_gt_info_entry)
+
+    if not isinstance(scene_gt_info_entry, dict):
+        return False
+
+    visib_fract = scene_gt_info_entry.get('visib_fract')
+    if visib_fract is None:
+        return False
+
+    try:
+        return float(visib_fract) > float(min_visib_fract)
+    except (TypeError, ValueError):
+        return False
+
+
 class VideoCornerDataset(Dataset):
     def __init__(self, dataset_root, seq_len=4, stride=1, transform=None, phase='train'):
         if seq_len <= 0 or stride <= 0:
