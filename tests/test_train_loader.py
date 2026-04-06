@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -14,9 +15,9 @@ import train_loader
 from train_loader import VideoCornerDataset, collate_fn
 
 
-def _write_png(path: Path) -> None:
+def _write_png(path: Path, size=(2, 2)) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    Image.new("RGB", (2, 2), color=(255, 255, 255)).save(path)
+    Image.new("RGB", size, color=(255, 255, 255)).save(path)
 
 
 def _write_ascii_ply(path: Path, vertices) -> None:
@@ -107,7 +108,7 @@ def _write_bop_scene(root: Path, frame_count: int) -> None:
     annotations = []
     for image_id in range(frame_count):
         file_name = f"{image_id:06d}.png"
-        _write_png(rgb_root / file_name)
+        _write_png(rgb_root / file_name, size=(64, 64))
         images.append({"id": image_id, "file_name": file_name})
         annotations.append(
             {
@@ -122,26 +123,9 @@ def _write_bop_scene(root: Path, frame_count: int) -> None:
     )
 
 
-def _build_bop_dataset(root: Path, frame_count: int = 4, low_visibility_frames=None) -> Path:
+def _write_bop_scene_at(root: Path, scene_name: str, frame_count: int, low_visibility_frames=None) -> None:
     low_visibility_frames = set(low_visibility_frames or set())
-    dataset_root = root
-
-    models_root = dataset_root / "models"
-    _write_ascii_ply(
-        models_root / "obj_000001.ply",
-        vertices=[
-            (-1.0, -1.0, -1.0),
-            (1.0, -1.0, -1.0),
-            (-1.0, 1.0, -1.0),
-            (1.0, 1.0, -1.0),
-            (-1.0, -1.0, 1.0),
-            (1.0, -1.0, 1.0),
-            (-1.0, 1.0, 1.0),
-            (1.0, 1.0, 1.0),
-        ],
-    )
-
-    scene_root = dataset_root / "train_pbr" / "000001"
+    scene_root = root / "train_pbr" / scene_name
     rgb_root = scene_root / "rgb"
     rgb_root.mkdir(parents=True, exist_ok=True)
 
@@ -150,7 +134,7 @@ def _build_bop_dataset(root: Path, frame_count: int = 4, low_visibility_frames=N
     scene_gt_info = {}
     for image_id in range(frame_count):
         file_name = f"{image_id:06d}.png"
-        _write_png(rgb_root / file_name)
+        _write_png(rgb_root / file_name, size=(64, 64))
         scene_gt[str(image_id)] = [
             {
                 "obj_id": 1,
@@ -183,6 +167,70 @@ def _build_bop_dataset(root: Path, frame_count: int = 4, low_visibility_frames=N
         json.dumps(scene_gt_info, indent=2),
         encoding="utf-8",
     )
+
+
+def _write_bop_scene_with_mixed_visibility(root: Path) -> None:
+    scene_root = root / "train_pbr" / "000001"
+    rgb_root = scene_root / "rgb"
+    rgb_root.mkdir(parents=True, exist_ok=True)
+
+    _write_png(rgb_root / "000000.png", size=(64, 64))
+
+    scene_gt = {
+        "0": [
+            {
+                "obj_id": 1,
+                "cam_R_m2c": [1.0, 0.0, 0.0,
+                              0.0, 1.0, 0.0,
+                              0.0, 0.0, 1.0],
+                "cam_t_m2c": [0.0, 0.0, 100.0],
+            },
+            {
+                "obj_id": 2,
+                "cam_R_m2c": [1.0, 0.0, 0.0,
+                              0.0, 1.0, 0.0,
+                              0.0, 0.0, 1.0],
+                "cam_t_m2c": [30.0, 0.0, 100.0],
+            },
+        ]
+    }
+    scene_camera = {
+        "0": {
+            "cam_K": [100.0, 0.0, 32.0,
+                      0.0, 100.0, 32.0,
+                      0.0, 0.0, 1.0],
+        }
+    }
+    scene_gt_info = {
+        "0": [
+            {"visib_fract": 1.0},
+            {"visib_fract": 0.0},
+        ]
+    }
+
+    (scene_root / "scene_gt.json").write_text(json.dumps(scene_gt, indent=2), encoding="utf-8")
+    (scene_root / "scene_camera.json").write_text(json.dumps(scene_camera, indent=2), encoding="utf-8")
+    (scene_root / "scene_gt_info.json").write_text(json.dumps(scene_gt_info, indent=2), encoding="utf-8")
+
+
+def _build_bop_dataset(root: Path, frame_count: int = 4, low_visibility_frames=None) -> Path:
+    dataset_root = root
+
+    models_root = dataset_root / "models"
+    _write_ascii_ply(
+        models_root / "obj_000001.ply",
+        vertices=[
+            (-1.0, -1.0, -1.0),
+            (1.0, -1.0, -1.0),
+            (-1.0, 1.0, -1.0),
+            (1.0, 1.0, -1.0),
+            (-1.0, -1.0, 1.0),
+            (1.0, -1.0, 1.0),
+            (-1.0, 1.0, 1.0),
+            (1.0, 1.0, 1.0),
+        ],
+    )
+    _write_bop_scene_at(dataset_root, "000001", frame_count, low_visibility_frames=low_visibility_frames)
     return dataset_root
 
 
@@ -322,10 +370,38 @@ def test_prefers_video_corner_labels_collate_fn_batches_image_ids_once(tmp_path)
     ]
 
 
+def test_bop_root_discovers_multiple_scenes(tmp_path):
+    dataset_root = _build_bop_dataset(tmp_path, frame_count=4)
+    _write_bop_scene_at(dataset_root, "000002", frame_count=5)
+
+    dataset = VideoCornerDataset(str(dataset_root), seq_len=4, stride=1, phase="train")
+
+    assert dataset.source_type == "bop_fallback"
+    assert len(dataset.clips) == 2
+    assert [clip["clip_id"] for clip in dataset.clips] == ["000001", "000002"]
+    assert len(dataset) == 3
+    assert dataset.sequence_starts == [
+        {"clip_index": 0, "start_idx": 0, "clip_id": "000001"},
+        {"clip_index": 1, "start_idx": 0, "clip_id": "000002"},
+        {"clip_index": 1, "start_idx": 1, "clip_id": "000002"},
+    ]
+
+
+def test_bop_relative_dataset_root_loads_without_double_prepend(tmp_path, monkeypatch):
+    relative_root = Path("relative_bop_dataset")
+    dataset_root = tmp_path / relative_root
+    _build_bop_dataset(dataset_root, frame_count=4)
+    monkeypatch.chdir(tmp_path)
+
+    dataset = VideoCornerDataset(str(relative_root), seq_len=4, stride=1, phase="train")
+
+    sample = dataset[0]
+    assert sample["image_paths"][0] == os.path.join(str(relative_root), "train_pbr", "000001", "rgb", "000000.png")
+    assert sample["heatmaps"].shape == (4, 8, 256, 256)
+
+
 def test_falls_back_to_bop_when_video_corner_labels_missing(tmp_path):
     dataset_root = _build_bop_dataset(tmp_path, frame_count=4)
-
-    pytest.xfail("Task 4: BOP fallback loader is not implemented yet")
 
     dataset = VideoCornerDataset(str(dataset_root), seq_len=4, stride=1, phase="train")
 
@@ -338,12 +414,78 @@ def test_falls_back_to_bop_when_video_corner_labels_missing(tmp_path):
 def test_bop_visibility_allows_empty_heatmap_for_low_visibility_frame(tmp_path):
     dataset_root = _build_bop_dataset(tmp_path, frame_count=4, low_visibility_frames={1})
 
-    pytest.xfail("Task 4: BOP fallback loader is not implemented yet")
-
     dataset = VideoCornerDataset(str(dataset_root), seq_len=4, stride=1, phase="train")
 
     sample = dataset[0]
     assert torch.count_nonzero(sample["heatmaps"][1]) == 0
+
+
+def test_bop_visibility_is_applied_per_annotation(tmp_path):
+    dataset_root = tmp_path
+    models_root = dataset_root / "models"
+    _write_ascii_ply(
+        models_root / "obj_000001.ply",
+        vertices=[
+            (-1.0, -1.0, -1.0),
+            (1.0, -1.0, -1.0),
+            (-1.0, 1.0, -1.0),
+            (1.0, 1.0, -1.0),
+            (-1.0, -1.0, 1.0),
+            (1.0, -1.0, 1.0),
+            (-1.0, 1.0, 1.0),
+            (1.0, 1.0, 1.0),
+        ],
+    )
+    _write_ascii_ply(
+        models_root / "obj_000002.ply",
+        vertices=[
+            (-1.0, -1.0, -1.0),
+            (1.0, -1.0, -1.0),
+            (-1.0, 1.0, -1.0),
+            (1.0, 1.0, -1.0),
+            (-1.0, -1.0, 1.0),
+            (1.0, -1.0, 1.0),
+            (-1.0, 1.0, 1.0),
+            (1.0, 1.0, 1.0),
+        ],
+    )
+    _write_bop_scene_with_mixed_visibility(dataset_root)
+
+    dataset = VideoCornerDataset(str(dataset_root), seq_len=1, stride=1, phase="train")
+
+    sample = dataset[0]
+
+    visible_corners_2d, _ = train_loader.project_corners_to_2d(
+        corners_3d=train_loader.load_ply_corners(models_root / "obj_000001.ply"),
+        R=np.eye(3, dtype=np.float32),
+        t=np.array([0.0, 0.0, 100.0], dtype=np.float32),
+        K=np.array([100.0, 0.0, 32.0,
+                    0.0, 100.0, 32.0,
+                    0.0, 0.0, 1.0], dtype=np.float32),
+        width=64,
+        height=64,
+    )
+    hidden_corners_2d, _ = train_loader.project_corners_to_2d(
+        corners_3d=train_loader.load_ply_corners(models_root / "obj_000002.ply"),
+        R=np.eye(3, dtype=np.float32),
+        t=np.array([30.0, 0.0, 100.0], dtype=np.float32),
+        K=np.array([100.0, 0.0, 32.0,
+                    0.0, 100.0, 32.0,
+                    0.0, 0.0, 1.0], dtype=np.float32),
+        width=64,
+        height=64,
+    )
+    hidden_x, hidden_y = hidden_corners_2d[0]
+    hidden_x = int(round(float(hidden_x)))
+    hidden_y = int(round(float(hidden_y)))
+    visible_x, visible_y = visible_corners_2d[0]
+    visible_x = int(round(float(visible_x) * 4.0))
+    visible_y = int(round(float(visible_y) * 4.0))
+    hidden_x = int(round(float(hidden_x) * 4.0))
+    hidden_y = int(round(float(hidden_y) * 4.0))
+
+    assert sample["heatmaps"][0, 0, hidden_y, hidden_x] < 1e-6
+    assert sample["heatmaps"][0, 0, visible_y, visible_x] > 0.01
 
 
 def test_projected_points_outside_image_are_dropped(tmp_path):

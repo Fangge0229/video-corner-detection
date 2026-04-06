@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import numpy as np
 from PIL import Image
 
@@ -20,6 +21,11 @@ def _default_sequence_transform():
 def _has_video_corner_labels(dataset_root):
     clips_path = os.path.join(dataset_root, 'video_corner_labels', 'clips.json')
     return os.path.isfile(clips_path)
+
+
+def _has_bop_root(dataset_root):
+    train_pbr_root = os.path.join(dataset_root, 'train_pbr')
+    return os.path.isdir(train_pbr_root)
 
 
 def _normalize_annotation_to_corners(annotation):
@@ -155,6 +161,152 @@ def _load_video_corner_label_clips(dataset_root):
     return clips
 
 
+def _load_scene_records(scene_dir, model_corner_cache, min_visib_fract=1e-6):
+    scene_name = os.path.basename(scene_dir.rstrip(os.sep))
+    scene_gt_path = os.path.join(scene_dir, 'scene_gt.json')
+    scene_camera_path = os.path.join(scene_dir, 'scene_camera.json')
+    scene_gt_info_path = os.path.join(scene_dir, 'scene_gt_info.json')
+
+    with open(scene_gt_path, 'r', encoding='utf-8') as f:
+        scene_gt = json.load(f)
+    with open(scene_camera_path, 'r', encoding='utf-8') as f:
+        scene_camera = json.load(f)
+
+    scene_gt_info = {}
+    if os.path.isfile(scene_gt_info_path):
+        with open(scene_gt_info_path, 'r', encoding='utf-8') as f:
+            scene_gt_info = json.load(f)
+
+    frame_ids = sorted(
+        {int(image_id) for image_id in scene_gt.keys()},
+        key=lambda value: value,
+    )
+
+    frames = []
+    for frame_idx in frame_ids:
+        frame_key = str(frame_idx)
+        anns = scene_gt.get(frame_key, [])
+        camera_entry = scene_camera.get(frame_key)
+        if not isinstance(anns, list) or not isinstance(camera_entry, dict):
+            continue
+
+        image_path = os.path.join(scene_dir, 'rgb', f'{frame_idx:06d}.png')
+
+        if os.path.isfile(image_path):
+            with Image.open(image_path) as image:
+                width, height = image.size
+        else:
+            width = height = None
+
+        if width is None or height is None:
+            continue
+
+        corners_list = [[] for _ in range(8)]
+        cam_K = camera_entry.get('cam_K')
+        if cam_K is None:
+            continue
+
+        frame_gt_info = scene_gt_info.get(frame_key)
+        if isinstance(frame_gt_info, (list, tuple)):
+            visibility_entries = list(frame_gt_info)
+        elif frame_gt_info is None:
+            visibility_entries = [None] * len(anns)
+        else:
+            visibility_entries = [frame_gt_info] * len(anns)
+
+        for ann_index, ann in enumerate(anns):
+            if not isinstance(ann, dict):
+                continue
+
+            ann_visib_info = visibility_entries[ann_index] if ann_index < len(visibility_entries) else None
+            if ann_visib_info is not None and not _frame_is_visible(ann_visib_info, min_visib_fract=min_visib_fract):
+                continue
+
+            obj_id = ann.get('obj_id')
+            if obj_id is None:
+                continue
+
+            try:
+                obj_id = int(obj_id)
+            except (TypeError, ValueError):
+                continue
+
+            model_corners = model_corner_cache.get(obj_id)
+            if model_corners is None:
+                continue
+
+            R = ann.get('cam_R_m2c')
+            t = ann.get('cam_t_m2c')
+            if R is None or t is None:
+                continue
+
+            projected_corners, visibility = project_corners_to_2d(
+                model_corners,
+                R=R,
+                t=t,
+                K=cam_K,
+                width=width,
+                height=height,
+            )
+
+            for class_id, is_visible in enumerate(visibility):
+                if is_visible:
+                    x, y = projected_corners[class_id]
+                    corners_list[class_id].append([float(x), float(y)])
+
+        frames.append({
+            'frame_idx': frame_idx,
+            'image_id': frame_idx,
+            'image_path': os.path.join('train_pbr', scene_name, 'rgb', f'{frame_idx:06d}.png'),
+            'corners_list': corners_list,
+            'source_type': 'bop_fallback',
+        })
+
+    return {
+        'clip_id': scene_name,
+        'frames': frames,
+        'source_type': 'bop_fallback',
+    }
+
+
+def _load_bop_clips(dataset_root):
+    train_pbr_root = os.path.join(dataset_root, 'train_pbr')
+    models_root = os.path.join(dataset_root, 'models')
+
+    if not os.path.isdir(train_pbr_root):
+        return []
+
+    model_corner_cache = {}
+    if os.path.isdir(models_root):
+        for file_name in sorted(os.listdir(models_root)):
+            if not file_name.endswith('.ply'):
+                continue
+            match = re.search(r'(\d+)', file_name)
+            if not match:
+                continue
+            obj_id = int(match.group(1))
+            model_corner_cache[obj_id] = load_ply_corners(os.path.join(models_root, file_name))
+
+    clips = []
+    for scene_name in sorted(os.listdir(train_pbr_root)):
+        scene_dir = os.path.join(train_pbr_root, scene_name)
+        if not os.path.isdir(scene_dir):
+            continue
+
+        required_files = [
+            os.path.join(scene_dir, 'scene_gt.json'),
+            os.path.join(scene_dir, 'scene_camera.json'),
+        ]
+        if not all(os.path.isfile(path) for path in required_files):
+            continue
+
+        scene_record = _load_scene_records(scene_dir, model_corner_cache)
+        if scene_record['frames']:
+            clips.append(scene_record)
+
+    return clips
+
+
 def corners_to_heatmap(corners_list, height, width, sigma=2.0, num_classes=8):
     heatmap = torch.zeros((num_classes, height, width), dtype=torch.float32)
     xx, yy = torch.meshgrid(torch.arange(width), torch.arange(height), indexing='xy')
@@ -254,6 +406,11 @@ def project_corners_to_2d(corners_3d, R, t, K, width, height):
     t = np.asarray(t, dtype=np.float32).reshape(3)
     K = np.asarray(K, dtype=np.float32)
 
+    if R.size == 9:
+        R = R.reshape(3, 3)
+    if K.size == 9:
+        K = K.reshape(3, 3)
+
     cam_points = (R @ corners_3d.T).T + t.reshape(1, 3)
     projected = np.full((corners_3d.shape[0], 2), np.nan, dtype=np.float32)
     visibility = []
@@ -308,6 +465,7 @@ class VideoCornerDataset(Dataset):
         self.max_corners = 32
 
         self.clips = self._load_clips()
+        self.source_type = self.clips[0]['source_type'] if self.clips else None
         self.sequence_starts = self._build_windows()
         print(f"找到 {len(self.clips)} 个 clips，可构造 {len(self.sequence_starts)} 个训练样本 ({phase}阶段)")
 
@@ -316,8 +474,12 @@ class VideoCornerDataset(Dataset):
             clips = _load_video_corner_label_clips(self.dataset_root)
             return [clip for clip in clips if len(clip['frames']) >= self.seq_len]
 
+        if _has_bop_root(self.dataset_root):
+            clips = _load_bop_clips(self.dataset_root)
+            return [clip for clip in clips if len(clip['frames']) >= self.seq_len]
+
         raise FileNotFoundError(
-            "video_corner_labels dataset not found; BOP fallback is not implemented in this task"
+            "video_corner_labels dataset not found and no BOP fallback root was found"
         )
 
     def _build_windows(self):
@@ -355,7 +517,10 @@ class VideoCornerDataset(Dataset):
         for frame in frames:
             image_path = frame['image_path']
             if not os.path.isabs(image_path):
-                image_path = os.path.join(self.dataset_root, 'video_corner_labels', image_path)
+                if frame.get('source_type', clip['source_type']) == 'bop_fallback':
+                    image_path = os.path.join(self.dataset_root, image_path)
+                else:
+                    image_path = os.path.join(self.dataset_root, 'video_corner_labels', image_path)
 
             image = Image.open(image_path).convert('RGB')
             orig_w, orig_h = image.size
