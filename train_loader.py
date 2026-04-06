@@ -25,6 +25,95 @@ def corners_to_heatmap(corners_list, height, width, sigma=2.0, num_classes=8):
     return heatmap
 
 
+class VideoCornerDataset(Dataset):
+    def __init__(self, dataset_root, seq_len=4, stride=1, transform=None, phase='train'):
+        if seq_len <= 0 or stride <= 0:
+            raise ValueError("seq_len and stride must both be positive")
+
+        self.dataset_root = dataset_root
+        self.seq_len = seq_len
+        self.stride = stride
+        self.transform = transform
+        self.phase = phase
+        self.max_corners = 32
+
+        self.clips = self._load_clips()
+        self.sequence_starts = self._build_windows()
+        print(f"找到 {len(self.clips)} 个 clips，可构造 {len(self.sequence_starts)} 个训练样本 ({phase}阶段)")
+
+    def _load_clips(self):
+        clips_path = os.path.join(self.dataset_root, 'video_corner_labels', 'clips.json')
+        with open(clips_path, 'r', encoding='utf-8') as f:
+            clips_data = json.load(f)
+
+        if not isinstance(clips_data, dict) or 'clips' not in clips_data or not isinstance(clips_data['clips'], list):
+            raise ValueError("video_corner_labels/clips.json must contain a 'clips' list")
+
+        raw_clips = clips_data['clips']
+        clips = []
+        for clip_idx, raw_clip in enumerate(raw_clips):
+            if not isinstance(raw_clip, dict):
+                raise ValueError("Each clip entry in video_corner_labels/clips.json must be an object")
+
+            if 'frames' not in raw_clip or not isinstance(raw_clip['frames'], list):
+                raise ValueError(f"Clip entry {clip_idx} in video_corner_labels/clips.json must contain a 'frames' list")
+
+            frames = raw_clip['frames']
+            normalized_frames = []
+            for frame_idx, frame in enumerate(frames):
+                if isinstance(frame, str):
+                    frame = {'image_path': frame}
+                elif not isinstance(frame, dict):
+                    raise ValueError(f"Frame entry {frame_idx} in clip '{raw_clip.get('clip_id', f'clip_{clip_idx:03d}')}' must be a string or object")
+
+                image_path = frame.get('image_path') or frame.get('file_name') or frame.get('path')
+                if not image_path:
+                    raise ValueError(f"Frame entry {frame_idx} in clip '{raw_clip.get('clip_id', f'clip_{clip_idx:03d}')}' must contain an image path")
+
+                normalized_frames.append({
+                    'frame_idx': frame.get('frame_idx', frame_idx),
+                    'image_path': image_path,
+                })
+
+            clips.append({
+                'clip_id': raw_clip.get('clip_id', f'clip_{clip_idx:03d}'),
+                'frames': normalized_frames,
+                'source_type': 'video_corner_labels',
+            })
+
+        return clips
+
+    def _build_windows(self):
+        windows = []
+        for clip_index, clip in enumerate(self.clips):
+            frame_count = len(clip['frames'])
+            if frame_count < self.seq_len:
+                continue
+
+            for start_idx in range(0, frame_count - self.seq_len + 1, self.stride):
+                windows.append({
+                    'clip_index': clip_index,
+                    'start_idx': start_idx,
+                    'clip_id': clip['clip_id'],
+                })
+
+        return windows
+
+    def __len__(self):
+        return len(self.sequence_starts)
+
+    def __getitem__(self, idx):
+        window = self.sequence_starts[idx]
+        clip = self.clips[window['clip_index']]
+        frames = clip['frames'][window['start_idx']:window['start_idx'] + self.seq_len]
+
+        return {
+            'clip_id': clip['clip_id'],
+            'frames': frames,
+            'source_type': clip['source_type'],
+        }
+
+
 class BOPCornerDataset(Dataset):
     def __init__(self, scene_dir, seq_len=4, stride=1, transform=None, phase='train'):
         self.scene_dir = scene_dir
