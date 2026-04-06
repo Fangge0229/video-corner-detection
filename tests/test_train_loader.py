@@ -332,7 +332,8 @@ def test_dataset_rejects_invalid_clip_and_frame_entries(tmp_path, clips_payload,
 
 def test_prefers_video_corner_labels_when_both_sources_exist(tmp_path):
     dataset_root = _build_video_corner_labels_dataset(tmp_path)
-    _write_bop_scene(dataset_root, frame_count=4)
+    _build_bop_dataset(dataset_root, frame_count=4)
+    assert (dataset_root / "train_pbr").is_dir()
 
     dataset = VideoCornerDataset(str(dataset_root), seq_len=4, stride=1, phase="train")
 
@@ -477,6 +478,64 @@ def test_create_bop_data_loader_supports_legacy_scene_dir(tmp_path):
     assert batch["heatmaps"].shape == (1, 4, 8, 256, 256)
     assert batch["image_ids"] == [[0, 1, 2, 3]]
     assert batch["image_paths"][0][0].endswith("train_pbr/000001/rgb/000000.png")
+
+
+def test_create_bop_data_loader_supports_legacy_coco_scene_dir(tmp_path):
+    dataset_root = tmp_path
+    _write_bop_scene(dataset_root, frame_count=4)
+    scene_dir = dataset_root / "scene_000001"
+
+    loader = train_loader.create_bop_data_loader(
+        str(scene_dir),
+        batch_size=1,
+        num_workers=0,
+        phase="val",
+        seq_len=4,
+        stride=1,
+    )
+    batch = next(iter(loader))
+
+    assert batch["images"].shape == (1, 4, 3, 256, 256)
+    assert batch["heatmaps"].shape == (1, 4, 8, 256, 256)
+    assert batch["image_ids"] == [[0, 1, 2, 3]]
+    assert batch["image_paths"][0][0].endswith("scene_000001/rgb/000000.png")
+    assert batch["clip_ids"] == ["scene_000001"]
+    assert batch["frame_indices"] == [[0, 1, 2, 3]]
+    assert batch["source_types"] == [["bop_legacy_coco"] * 4]
+    assert len(batch["corners_list"]) == 1
+    assert len(batch["corners_list"][0]) == 4
+    assert len(batch["corners_list"][0][0]) == 8
+    assert batch["corners_list"][0][0][0] == [[0.0, 0.0]]
+
+
+@pytest.mark.parametrize("seq_len,stride", [(0, 1), (4, 0), (-1, 1), (4, -2)])
+def test_bop_corner_dataset_rejects_non_positive_window_parameters(tmp_path, seq_len, stride):
+    dataset_root = _build_bop_dataset(tmp_path, frame_count=4)
+    scene_dir = dataset_root / "train_pbr" / "000001"
+
+    with pytest.raises(ValueError, match="seq_len and stride must both be positive"):
+        train_loader.BOPCornerDataset(
+            scene_dir=str(scene_dir),
+            seq_len=seq_len,
+            stride=stride,
+            phase="train",
+        )
+
+
+@pytest.mark.parametrize("seq_len,stride", [(0, 1), (4, 0), (-1, 1), (4, -2)])
+def test_create_bop_data_loader_rejects_non_positive_window_parameters(tmp_path, seq_len, stride):
+    dataset_root = _build_bop_dataset(tmp_path, frame_count=4)
+    scene_dir = dataset_root / "train_pbr" / "000001"
+
+    with pytest.raises(ValueError, match="seq_len and stride must both be positive"):
+        train_loader.create_bop_data_loader(
+            str(scene_dir),
+            batch_size=1,
+            num_workers=0,
+            phase="train",
+            seq_len=seq_len,
+            stride=stride,
+        )
 
 
 def test_bop_root_discovers_multiple_scenes(tmp_path):

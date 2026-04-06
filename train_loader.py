@@ -452,10 +452,14 @@ def _frame_is_visible(scene_gt_info_entry, min_visib_fract=1e-6):
         return False
 
 
+def _validate_window_parameters(seq_len, stride):
+    if seq_len <= 0 or stride <= 0:
+        raise ValueError("seq_len and stride must both be positive")
+
+
 class VideoCornerDataset(Dataset):
     def __init__(self, dataset_root, seq_len=4, stride=1, transform=None, phase='train'):
-        if seq_len <= 0 or stride <= 0:
-            raise ValueError("seq_len and stride must both be positive")
+        _validate_window_parameters(seq_len, stride)
 
         self.dataset_root = dataset_root
         self.seq_len = seq_len
@@ -568,6 +572,7 @@ class VideoCornerDataset(Dataset):
 
 class BOPCornerDataset(Dataset):
     def __init__(self, scene_dir, seq_len=4, stride=1, transform=None, phase='train'):
+        _validate_window_parameters(seq_len, stride)
         self.scene_dir = scene_dir
         self.seq_len = seq_len
         self.stride = stride
@@ -599,6 +604,9 @@ class BOPCornerDataset(Dataset):
         start_idx = self.sequence_starts[idx]
         seq_images = []
         seq_heatmaps = []
+        seq_corners_list = []
+        seq_source_types = []
+        seq_frame_indices = []
         seq_image_ids = []
         seq_image_paths = []
 
@@ -659,12 +667,19 @@ class BOPCornerDataset(Dataset):
 
             seq_images.append(image)
             seq_heatmaps.append(heatmap)
+            seq_corners_list.append(scaled_corners_per_class)
+            seq_source_types.append('bop_legacy_coco')
+            seq_frame_indices.append(img_id)
             seq_image_ids.append(img_id)
             seq_image_paths.append(img_path)
 
         return {
+            'clip_id': os.path.basename(self.scene_dir.rstrip(os.sep)),
             'images': torch.stack(seq_images, dim=0),
             'heatmaps': torch.stack(seq_heatmaps, dim=0),
+            'corners_list': seq_corners_list,
+            'source_types': seq_source_types,
+            'frame_indices': seq_frame_indices,
             'image_ids': seq_image_ids,
             'image_paths': seq_image_paths
         }
@@ -725,6 +740,8 @@ def create_video_data_loader(dataset_root, batch_size=2, num_workers=0, phase='t
 
 
 def create_bop_data_loader(scene_dir, batch_size=2, num_workers=0, phase='train', seq_len=4, stride=1):
+    _validate_window_parameters(seq_len, stride)
+
     scene_gt_coco_path = os.path.join(scene_dir, 'scene_gt_coco.json')
     scene_gt_path = os.path.join(scene_dir, 'scene_gt.json')
     scene_camera_path = os.path.join(scene_dir, 'scene_camera.json')
