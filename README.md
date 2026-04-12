@@ -2,7 +2,7 @@
 
 `video-corner-detection` 是一个面向视频序列的角点检测实验仓库，目标是把单帧角点检测扩展为适用于 clip / video 的时序建模流程。当前仓库的核心价值主要集中在数据读取与训练样本组织：它已经可以从视频角点标注或 BOP 风格数据中构造时序样本，并输出适合视频模型训练的张量批次。
 
-这个仓库同时保留了几条不同阶段的建模尝试，包括单帧角点热图模型、基于 ConvLSTM 的视频角点模型，以及一个尚在草稿阶段的 Transformer 风格 `model.py`。如果你是第一次进入这个项目，建议优先关注 `train_loader.py` 和 `video_corner_detection.py`，再根据需要查看其他文件。
+这个仓库同时保留了几条不同阶段的建模尝试，包括单帧角点热图模型、基于 ConvLSTM 的视频角点模型，以及一个尚在草稿阶段的 Transformer 风格 `model.py`。如果你是第一次进入这个项目，建议优先关注 `train_loader.py`、`video_corner_detection.py` 和当前新增的 `train.py` 草稿，再根据需要查看其他文件。
 
 ## Project Snapshot
 
@@ -10,7 +10,7 @@
 - 当前最稳定模块：`train_loader.py`
 - 当前已验证内容：训练数据加载、时序窗口切分、heatmap 监督生成、兼容 `video_corner_labels` 和 `train_pbr`
 - 当前测试状态：`pytest -q` 本地验证 `35 passed`
-- 当前代码形态：数据链路较完整，训练入口与新模型文件仍处于持续整理中
+- 当前代码形态：数据链路较完整，训练入口已出现初始草稿，但整体训练闭环仍在整理中
 
 ## What The Repository Contains
 
@@ -30,13 +30,13 @@
 ### 仍在整理或实验中的部分
 
 - `train.py`
-  当前为空文件，尚未形成正式训练入口。
+  已新增一个 `train_one_step(...)` 级别的训练步骤草稿，但还不是完整的训练入口脚本。
 
 - `model.py`
   新建的时序模型草稿文件，意图是构建基于 ROI encoder + temporal transformer 的视频角点模型，但目前还不是可直接使用的稳定实现。
 
 - `loss.py`
-  当前为空文件，尚未承载正式损失逻辑。
+  已新增角点回归与置信度损失函数，但与 `train.py` / `model.py` 的接口还需要继续对齐。
 
 - `video.py`
   主要是基于外部 HCCEPose 代码路径的视频推理脚本，不是一个独立、可直接复用的通用入口。
@@ -221,9 +221,22 @@ print(sample["images"].shape)    # (T, 3, 256, 256)
 print(sample["heatmaps"].shape)  # (T, 8, 256, 256)
 ```
 
-## Model Files
+## Training And Model Files
 
 这一部分更偏向开发维护说明，帮助你快速判断哪些代码适合继续扩展。
+
+### `train.py`
+
+`train.py` 目前已经不再是空文件，而是包含一个 `train_one_step(model, batch, optimizer, device)` 形式的训练步骤草稿。它体现了项目正在往“显式训练循环”方向推进，但当前状态仍更接近原型代码，而不是可以直接启动完整训练任务的脚本。
+
+从现有实现看，它的定位大致是：
+
+- 将 batch 中的 ROI 图像和监督信号搬到目标设备
+- 调用模型得到角点与置信度预测
+- 调用 `corner_loss(...)` 计算损失
+- 执行一次反向传播和参数更新
+
+不过它目前还没有形成完整训练入口，仍缺少诸如数据构建、epoch 循环、日志记录、checkpoint 保存和验证流程等外围逻辑。
 
 ### `video_corner_detection.py`
 
@@ -262,11 +275,13 @@ print(sample["heatmaps"].shape)  # (T, 8, 256, 256)
 
 ### `loss.py`
 
-`loss.py` 目前为空文件，说明损失模块还没有从 `video_corner_detection.py` 中正式拆分出来。
+`loss.py` 现在已经开始承载新的损失定义，包括：
 
-### `train.py`
+- `corner_regression_loss`
+- `corner_confidence_loss`
+- `corner_loss`
 
-`train.py` 目前为空文件，表明仓库还缺一个正式的统一训练入口脚本。
+这说明项目正在把训练损失从旧文件中逐步拆出来，往更清晰的模块划分方向推进。不过目前训练脚本、模型输出和损失返回格式之间还没有完全统一，仍需要后续整理。
 
 ## Backward Compatibility
 
@@ -314,9 +329,9 @@ pytest -q
 
 为了避免 README 过度承诺，下面是当前仓库比较实际的状态总结。
 
-- 训练入口尚未统一，`train.py` 还未落地
+- 训练入口尚未统一，`train.py` 目前仍只是单步训练草稿
 - `model.py` 仍是实验草稿，不应默认视为可训练主模型
-- `loss.py` 还未承担正式逻辑
+- `loss.py` 已有初始实现，但尚未和全部训练代码稳定对齐
 - `video.py` 依赖外部 HCCEPose 环境，不属于完全自包含脚本
 - 当前项目最成熟的是“数据组织与监督生成”，不是完整的一键训练闭环
 
