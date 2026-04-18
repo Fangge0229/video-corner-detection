@@ -1,7 +1,7 @@
 import os
 import torch
 from loss import *
-from video_corner_detection import *
+from model import *
 def train_one_step(model, batch, optimizer, device):
     model.train()
     
@@ -51,20 +51,4 @@ def train(model, train_loader, val_loader, optimizer, device, num_epochs, checkp
         print(epoch, stats)
     print("Training finished")
 
-def update_sequence_memory(sequence_memory, sequence_id, roi_tensor, transform, max_len):
-    if sequence_id not in sequence_memory:
-        sequence_memory[sequence_id] = []
-    sequence_memory[sequence_id].append({
-        "roi_image": roi_tensor,
-        "tranform": tranform
-    })
-    
-    if len(sequence_memory[sequence_id]) > max_len:
-        sequence_memory[sequence_id] = sequence_memory[sequence_id][-max_len:]
-    return sequence_memory
-
-def build_inference_sequence(sequence_memory, sequence_roi, sequence_id, current_roi, seq_len):
-    history = sequence_memory.get(sequence_id, default=[])
-    seq = [item["roi_image"] for item in history]
-    seq.append(current_roi)
 
