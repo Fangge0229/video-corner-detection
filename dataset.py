@@ -198,3 +198,18 @@ def build_sequences_from_bop_scenes(dataset_root):
                     model_corner_cache = model_corner_cache
                 )
                 bbox = corners_to_xyxy(corners_2d)
+                corner_vis = estimate_corner_visibility(corners_2d, infos, ann_idx)
+
+                record = {
+                    "source_type": "bop_scene_clip",
+                    "sequence_id": sequence_id,
+                    "frame_id": int(image_id),
+                    "image_path": str(scene_dir / "rgb" / f"{image_id:06d}.png"),
+                    "bbox": bbox,
+                    "corners": corners_2d,
+                    "corner_vis": corner_vis,
+                    "camera": camera,
+                    "obj_id": obj_id,
+                }
+                all_sequences.setdefault(sequence_id, []).append(record)
+    return all_sequences
