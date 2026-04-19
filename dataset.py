@@ -3,7 +3,7 @@ import torch
 import json
 from pathlib import Path
 import numpy as np
-
+from roi_ops import *
 
 def build_sequence_index(sequences, seq_len):
     index = []
@@ -191,3 +191,62 @@ def build_sequences_from_bop_scenes(dataset_root):
                 }
                 all_sequences.setdefault(sequence_id, []).append(record)
     return all_sequences
+
+def image_to_tensor(image):
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    image = image.astype(np.float32) / 255.0
+    image = np.transpose(image, (2, 0, 1))
+    tensor = torch.from_numpy(image)
+
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+
+    tensor = (tensor - mean) / std
+    return tensor  
+class VideoCornerDataset(Dataset):
+    def __init__(self, anns, image_root, sesq_len=4, roi_size=(128, 128)):
+        self.anns = anns
+        self.image_root = image_root
+        self.seq_len = seq_len
+        self.roi_size = roi_size
+        
+        self.all_sequences = build_sequences_from_bop_scenes(anns, image_root)
+        self.sequence_index = build_sequence_index(self.all_sequences, seq_len)
+
+    def __len__(self):
+        return len(self.sequence_index)
+
+    def __getitem__(self, idx):
+      item = self.sequencec_index[idx]
+      window = item["window"]
+
+      roi_images = []
+      frame_ids = []
+      target_corners = None
+      target_vis = None
+      target_bbox = None
+      target_transform = None
+
+      for i, record in enumerate(window):
+        image = cv2.imread(record["image_path"])
+        bbox = record["bbox"]
+        roi_img, transform = crop_and_resize_roi(image, bbox, self.roi_size)
+        roi_tensor = image_to_tensor(roi_image)
+        roi_images.append(roi_tensor)
+        frame_ids.append(record["frame_id"])
+        if i == len(window) - 1:
+            target_corners = corners_image_to_roi(record["corners"], transform)
+            target_vis = torch.as_tensor(record["corner_vis"])
+            target_bbox = torch.as_tensor(bbox)
+            target_transform = transform
+        
+    return {
+        "roi_images": torch.stack(roi_images, dim=0),
+        "target_corners": target_corners,
+        "target_vis": target_vis,
+        "target_bbox": target_bbox,
+        "target_transform": target_transform,
+        "sequence_id": item["sequence_id"],
+        "frame_ids": frame_ids
+    }
+            
