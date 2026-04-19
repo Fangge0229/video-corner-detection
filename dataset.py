@@ -250,3 +250,13 @@ class VideoCornerDataset(Dataset):
         "frame_ids": frame_ids
     }
             
+def collate_fn(batch):
+    return {
+        "roi_images": torch.stack([x["roi_images"] for x in batch], dim=0),
+        "target_corners": torch.stack([x["target_corners"] for x in batch], dim=0),
+        "target_vis": torch.stack([x["target_vis"] for x in batch], dim=0),
+        "target_bbox": torch.stack([x["target_bbox"] for x in batch], dim=0),
+        "target_transform": [x["target_transform"] for x in batch],
+        "sequence_id": [x["sequence_id"] for x in batch],
+        "frame_ids": [x["frame_ids"] for x in batch]
+    }
