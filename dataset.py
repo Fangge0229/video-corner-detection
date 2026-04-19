@@ -139,7 +139,42 @@ def projects_3d_box_corners(obj_id, R, t, K, model_corner_cache):
         y = pixel_h[1] / pixel_h[2]
         corners_2d[i] = [x, y]
     return conners_2d
+
+def estimate_corner_visibility(corners_2d, infos, ann_idx, minvisib_fract=1e-6):
+    """
+    corners_2d:
+        Tensor[8, 2]
+    infos:
+        当前 image_id 对应的 scene_gt_info 列表
+    ann_idx:
+        当前实例在 anns 中的索引
+
+    return:
+        corner_vis:
+            Tensor[8], 每个元素是 0/1
+    """
+    corner_vis = torch.is_finite(corners_2d).all(dim=-1).float()
+    if infos is None or ann_idx>= len(infos):
+        return corner_vis
     
+    info = infos[ann_idx]
+    visib_fract = info.get("visib_fract", None)
+    if visib_fract is not None and visib_fract <= minvisib_fract:
+        return torch.zeros(8)
+    bbox_visib = info.get("bbox_fract", None)
+    if bbox_visib is not None:
+        x, y, w, h = bbox_visib
+        x2 = x + w
+        y2 = y + h
+        for i in range(8):
+            if corner_vis[i] == 0:
+                continue
+            px, py = corners_2d[i]
+            if not (x <= px <= x2 and y <= py <= y2):
+                corner_vis[i] = 0
+    return corner_vis
+    
+
 def build_sequences_from_bop_scenes(dataset_root):
     all_sequences = {}
 
