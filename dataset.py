@@ -293,14 +293,19 @@ def image_to_tensor(image):
     tensor = (tensor - mean) / std
     return tensor  
 class VideoCornerDataset(Dataset):
-    def __init__(self, anns, image_root, seq_len=4, roi_size=(128, 128)):
-        self.anns = anns
-        self.image_root = image_root
+    def __init__(self, dataset_root, seq_len=4, roi_size=(128, 128)):
+        self.dataset_root = dataset_root
         self.seq_len = seq_len
         self.roi_size = roi_size
         
-        self.all_sequences = build_sequences_from_bop_scenes(anns, image_root)
-        self.sequence_index = build_sequence_index(self.all_sequences, seq_len)
+        if self.seq_len <= 0:
+            raise ValueError("seq_len must be positive")
+        self.model_corner_cache = build_model_corner_cache(self.dataset_root / "models")
+        self.all_sequences = build_sequences_from_bop_scenes(
+            dataset_root=self.dataset_root,
+            model_corner_cache=self.model_corner_cache
+            )
+        self.sequence_index = build_sequence_index(self.all_sequences, self.seq_len)
 
     def __len__(self):
         return len(self.sequence_index)
