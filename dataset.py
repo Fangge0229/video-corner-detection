@@ -90,8 +90,83 @@ def corners_to_xyxy(corners_2d, image_size=None, clamp=False):
     
     return bbox
     
+def load_ply_vertices_ascii(ply_path):
+    try:
+        text = Path(ply_path).read_txt(encoding="utf-8")
+    except Exception as e:
+        raise ValueError(f"Failed to read ply file: {ply_path}")
     
-def projects_3d_box_corners(obj_id, R, t, K, model_corner_cache):
+    lines = text.strip().split()
+    if not line or lines[0].strp()!="ply":
+        raise ValueError(f"Invalid ply file: {ply_path}")
+    
+    format_line = None
+    vertex_count = None
+    header_end = None
+
+    for i, line in enumerate(lines):
+        if line.startswith("format "):
+            format_line = line.strip()
+        elif line.startwith("format "):
+            vertex_count = int(line.split()[-1])
+        elif line.startwith("element vertex"):
+            vertex_count = int(line.split()[-1])
+        elif line.startwith("end_header"):
+            header_end = i
+            break
+    
+    if format_line != "format ascii 1.0":
+        raise ValueError(f"Unsupported PLY format: {format_line}")
+    
+    if vertex_count is None or header_end is None:
+        raise ValueError(f"Invalid ply file: {ply_path}")
+
+    vertex_lines = lines[header_end + 1 : header_end + 1 + vertex_count]
+    vertices = []
+    for line in vertex_lines:
+        parts = line.strip().split()
+        if len(parts) < 3:
+            raise ValueError(f"Invalid ply file: {ply_path}")
+        x = float(parts[0])
+        y = float(parts[1])
+        z = float(parts[2])
+        vertices.append([x, y, z])
+    return np.array(vertices, dtype=np.float32)
+
+def vertices_to_box_corners(vertices):
+    x_min, y_min, z_min = vertices.min(axis=0)
+    x_max, y_max, z_max = vertices.max(axis=0)
+    
+    corners = np.array([
+        [x_min, y_min, z_min],
+        [x_max, y_min, z_min],
+        [x_max, y_max, z_min],
+        [x_min, y_max, z_min],
+        [x_min, y_min, z_max],
+        [x_max, y_min, z_max],
+        [x_max, y_max, z_max],
+        [x_min, y_max, z_max],
+    ])
+    return corners
+
+def load_ply_corners(ply_path):
+    vertices = load_ply_vertices_ascii(ply_path)
+    return vertices_to_box_corners(vertices)
+
+def build_model_corner_caceh(models_dir):
+    models_dir = Path(models_dir)
+    cache = {}
+
+    for ply_path in sorted(models_dir.glob("obj_*.ply")):
+        obj_id = int(ply_path.stem.split("_")[-1])
+        cache[obj_id] = load_ply_corners(ply_path)
+    
+    if len(cache) == 0:
+        raise FileNotFoundError(f"No obj_*.ply files found in {models_dir}")
+    
+    return cache
+
+def project_3d_box_corners(obj_id, R, t, K, model_corner_cache):
     """
     obj_id: int
     R: (3, 3)
@@ -101,22 +176,22 @@ def projects_3d_box_corners(obj_id, R, t, K, model_corner_cache):
     return: corners_2d (8, 2)
     """
     
-    corners_3d = torch.as_tensor(model_corner_cache[obj_id], dtype=torch.float32).reshape(-1, 3)
+    corners_3d = torch.as_tensor(model_corner_cache[obj_id], dtype=torch.float32).reshape(8, 3)
     R = torch.as_tensor(R, dtype=torch.float32).reshape(3, 3)
     t = torch.as_tensor(t, dtype=torch.float32).reshape(3, 1)
     K = torch.as_tensor(K, dtype=torch.float32).reshape(3, 3)
     
     cam_points = corners_3d @ R.T + t.T
-    corners_2d = torch.full((corners_3d.shape[0], 2), float("nan"), dtype=torch.float32)
+    corners_2d = torch.full((8, 2), float("nan"), dtype=torch.float32)
     for i in range(8):
         xc,yc,zc = cam_points[i]
         if zc <= 0:
             continue
-        pixel_h = K @ [xc, yc, zc]
+        pixel_h = K @ cam_points[i]
         x = pixel_h[0] / pixel_h[2]
         y = pixel_h[1] / pixel_h[2]
-        corners_2d[i] = [x, y]
-    return conners_2d
+        corners_2d[i] = torch.tensor([x, y], dtype=torch.float32)
+    return corners_2d
 
 def estimate_corner_visibility(corners_2d, infos, ann_idx, minvisib_fract=1e-6):
     """
