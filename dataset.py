@@ -4,21 +4,26 @@ import json
 from pathlib import Path
 import numpy as np
 from roi_ops import *
+import cv2
+import dataset
 
 def build_sequence_index(sequences, seq_len):
+    if seq_len <= 0:
+        raise ValueError("seq_len must be positive")
+    
     index = []
     for seq_id, records in sequences.items():
-        records = sort_by_frame_idx(records)
+        records = sorted(records, key=lambda r: int(r["frame_id"]))
         
         if len(records) < seq_len:
             continue
         
-        for end in range(seq_len-1, len(records)):
+        for end in range(seq_len - 1, len(records)):
             window = records[end - seq_len + 1 : end + 1]
             index.append({
-                "seq_id": seq_id,
-                "start_frame": window[0]["frame_idx"],
-                "end_frame": window[-1]["frame_idx"],
+                "sequence_id": seq_id,
+                "start_frame": window[0]["frame_id"],
+                "end_frame": window[-1]["frame_id"],
                 "window": window
             })
     return index
@@ -206,6 +211,7 @@ def estimate_corner_visibility(corners_2d, infos, ann_idx, minvisib_fract=1e-6):
         corner_vis:
             Tensor[8], 每个元素是 0/1
     """
+    corners_2d = torhc.as_tensor(corners_2d, dtype=torch.float32).reshape(8, 2)
     corner_vis = torch.is_finite(corners_2d).all(dim=-1).float()
     if infos is None or ann_idx>= len(infos):
         return corner_vis
@@ -214,7 +220,7 @@ def estimate_corner_visibility(corners_2d, infos, ann_idx, minvisib_fract=1e-6):
     visib_fract = info.get("visib_fract", None)
     if visib_fract is not None and visib_fract <= minvisib_fract:
         return torch.zeros(8)
-    bbox_visib = info.get("bbox_fract", None)
+    bbox_visib = info.get("bbox_visib", None)
     if bbox_visib is not None:
         x, y, w, h = bbox_visib
         x2 = x + w
@@ -227,16 +233,19 @@ def estimate_corner_visibility(corners_2d, infos, ann_idx, minvisib_fract=1e-6):
                 corner_vis[i] = 0
     return corner_vis
     
+def list_dir(root_dir):
+    return [d for d in Path(root_dir).iterdir() if d.is_dir()]
 
-def build_sequences_from_bop_scenes(dataset_root):
+def build_sequences_from_bop_scenes(dataset_root, model_corner_cache):
     all_sequences = {}
 
     for scene_dir in list_dir(os.path.join(dataset_root, "train_pbr")):
+        scene_dir = Path(scene_dir)
         scene_gt = load_json(scene_dir / "scene_gt.json")
         scene_camera = load_json(scene_dir / "scene_camera.json")
         scene_gt_info = load_json(scene_dir / "scene_gt_info.json")
     
-        for image_id in sorted(scene_gt.key()):
+        for image_id in sorted(scene_gt.keys()):
             anns = scene_gt[image_id]
             camera = scene_camera[image_id]
             infos = scene_gt_info.get(image_id, [])
@@ -252,10 +261,11 @@ def build_sequences_from_bop_scenes(dataset_root):
                 )
                 bbox = corners_to_xyxy(corners_2d)
                 corner_vis = estimate_corner_visibility(corners_2d, infos, ann_idx)
+                sequence_id = f"scene_{scene_dir.name}_obj_{obj_id:06d}"
 
                 record = {
                     "source_type": "bop_scene_clip",
-                    "sequence_id": sequence_id,
+                    "sequence_id": scene_dir.name,
                     "frame_id": int(image_id),
                     "image_path": str(scene_dir / "rgb" / f"{image_id:06d}.png"),
                     "bbox": bbox,
@@ -268,6 +278,10 @@ def build_sequences_from_bop_scenes(dataset_root):
     return all_sequences
 
 def image_to_tensor(image):
+    if image is None:
+        raise ValueError("image is None")
+    if image.ndim != e or image.shape[2] != 3:
+        raise ValueError(f"expected image shape [H, W, 3], got {image.shape}")
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     image = image.astype(np.float32) / 255.0
     image = np.transpose(image, (2, 0, 1))
@@ -279,7 +293,7 @@ def image_to_tensor(image):
     tensor = (tensor - mean) / std
     return tensor  
 class VideoCornerDataset(Dataset):
-    def __init__(self, anns, image_root, sesq_len=4, roi_size=(128, 128)):
+    def __init__(self, anns, image_root, seq_len=4, roi_size=(128, 128)):
         self.anns = anns
         self.image_root = image_root
         self.seq_len = seq_len
