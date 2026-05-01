@@ -29,7 +29,10 @@ def crop_and_resize_roi(image, bbox, out_size):
         transform:
             dict
     """
-    x1, y1, x2, y2 = bbox
+    if image is None:
+        raise ValueError("image is None")
+
+    x1, y1, x2, y2 = sanitize_bbox(bbox, image.shape)
     crop = image[y1:y2, x1:x2]
     roi_image = cv2.resize(crop, (out_size[1], out_size[0]))
     
@@ -83,10 +86,7 @@ def corners_roi_to_image(corners_roi, transform):
     sx = transform["scale_x"]
     sy = transform["scale_y"]
     
-    corners_xy = []
-    for xr, yr in corners_roi:
-        x = xr / sx + x1
-        y = yr / sy + y1
-        corners_xy.append([x, y])
-    
-    return torch.tensor(corners_xy, dtype=torch.float32)
+    corners_xy = torch.empty_like(corners_roi)
+    corners_xy[:, 0] = corners_roi[:, 0] / sx + x1
+    corners_xy[:, 1] = corners_roi[:, 1] / sy + y1
+    return corners_xy
