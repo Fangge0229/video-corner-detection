@@ -25,7 +25,7 @@ def corner_confidence_loss(pred_conf_logits, target_vis):
     loss = loss.mean()
     return loss
 
-def corner_loss(pred_corners, target_corners, pred_conf_logits, target_vis):
+def corner_loss(pred_corners, target_corners, pred_conf_logits, target_vis, lambda_conf=0.5):
     """
     pred_corners:       [B, 8, 2]
     target_corners:     [B, 8, 2]
@@ -34,8 +34,9 @@ def corner_loss(pred_corners, target_corners, pred_conf_logits, target_vis):
     """
     reg_loss = corner_regression_loss(pred_corners, target_corners, target_vis)
     conf_loss = corner_confidence_loss(pred_conf_logits, target_vis)
+    total = reg + lambda_conf * conf
     return {
-        "loss": loss,
-        "loss_corner": loss_corner,
-        "moss_conf": loss_conf
+        "loss": total,
+        "loss_corner": reg_loss,
+        "moss_conf": conf_loss
     }
