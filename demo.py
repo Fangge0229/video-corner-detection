@@ -11,8 +11,8 @@ def infer_one_instance(model, roi_seq, current_transform, device=None):
 
     with torch.no_grad():
         pred = model(roi_seq)
-    pred_corners_roi = pred["corners_pred"][-1]
-    pred_conf = torch.sigmoid(pred["conf_logits_pred"][-1])
+    pred_corners_roi = pred["corners_pred"][0]
+    pred_conf = torch.sigmoid(pred["conf_logits_pred"][0])
 
     pred_corners_img = corners_roi_to_img(pred_corners_rois, current_transform)
     return {
