@@ -2,7 +2,7 @@ import os
 import torch
 from loss import *
 from model import *
-def train_one_step(model, batch, optimizer, device):
+def train_one_step(model, batch, optimizer, device, lambda_conf=0.5):
     model.train()
     
     roi_images = batch["roi_images"].to(device)
@@ -16,7 +16,7 @@ def train_one_step(model, batch, optimizer, device):
     }
 
     pred = model(batch_gpu["roi_images"])
-    loss_dict = corner_loss(pred["corners_pred"], batch_gpu["target_corners"], pred["conf_logits_pred"], batch_gpu["target_vis"])
+    loss_dict = corner_loss(pred["corners_pred"], batch_gpu["target_corners"], pred["conf_logits_pred"], batch_gpu["target_vis"], lambda_conf=lambda_conf)
     
     optimizer.zero_grad()
     loss_dict["loss"].backward()
@@ -40,15 +40,15 @@ def average_stats(meter):
 def train_one_epoch(model, dataloader, optimizer, device):
     meter = []
     for batch in dataloader:
-        stats = train_one_step(model, batch, optimizer, device)
+        stats = train_one_step(model, batch, optimizer, device, lambda_conf=lambda_conf)
         meter.append(stats)
     meter = {k: [d[k] for d in meter] for k in meter[0]}
     return average_stats(meter)
 
-def train(model, train_loader, val_loader, optimizer, device, num_epochs, checkpoint_path=None):
+def train(model, train_loader, val_loader, optimizer, device, num_epochs, lambda_conf=0.5):
     for epoch in range(num_epochs):
-        stats = train_one_epoch(model, train_loader, optimizer, device)
-        print(epoch, stats)
+        stats = train_one_epoch(model, train_loader, optimizer, device, lambda_conf=lambda_conf)
+        print(f"epoch={epoch}, stats={stats}")
     print("Training finished")
 
 

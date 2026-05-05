@@ -1,11 +1,17 @@
 import cv2
 import torch
 
-def infer_one_instance(model, roi_seq, current_transform):
+def infer_one_instance(model, roi_seq, current_transform, device=None):
     model.eval()
+    if roi_seq.ndim == 4:
+        roi_seq = roi_seq.unsqueeze(0)
+    
+    if device is not None:
+        roi_seq = roi_seq.to(device)
+
     with torch.no_grad():
         pred = model(roi_seq)
-    pred_corners_rois = pred["corners_pred"][-1]
+    pred_corners_roi = pred["corners_pred"][-1]
     pred_conf = torch.sigmoid(pred["conf_logits_pred"][-1])
 
     pred_corners_img = corners_roi_to_img(pred_corners_rois, current_transform)
@@ -40,6 +46,9 @@ def build_inference_sequence(sequence_memory, sequence_roi, sequence_id, current
     history = sequence_memory.get(sequence_id, default=[])
     seq = [item["roi_image"] for item in history]
     seq.append(current_roi)
+
+    if len(seq) == 0:
+        raise ValueError("sequence is unexpectedly empty")
 
     while len(seq) < seq_len:
         seq.insert(0, seq[0])
