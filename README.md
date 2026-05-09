@@ -1,15 +1,60 @@
 # video-corner-detection
 
-`video-corner-detection` 是一个面向视频序列角点检测的实验仓库。当前代码重点已经从早期的单文件实现，重构为按职责拆分的训练草稿、数据草稿、损失函数和推理辅助模块。
+`video-corner-detection` 是一个面向视频 ROI 序列的 3D box 角点检测实验项目。当前主线目标是：从 BOP 风格数据集中构造连续 ROI 序列，模型只使用最后一个时间步输出 8 个角点坐标和 8 个角点可见性 logits。
 
-这个仓库目前更适合被理解为“正在整理中的研究代码”，而不是已经稳定封装好的训练框架。
+这个仓库仍是整理中的研究代码，不是已经稳定封装好的训练框架。
 
-## Current Status
+## Current Mainline Contract
 
-- 当前主线是把视频 ROI 序列送入时序模型，预测每帧 8 个角点及其置信度
-- 旧的 `video_corner_detection.py` 已移除，代码正在拆分到更小的模块中
-- `model.py`、`dataset.py`、`demo.py`、`roi_ops.py` 目前都还处于草稿阶段
-- `train.py` 仍然只是一个轻量训练循环骨架，不是完整训练入口
+当前代码应统一使用下面的接口命名。
+
+模型输出：
+
+```python
+{
+    "corners_pred": corner_pred,
+    "conf_logits_pred": confidence_pred,
+}
+```
+
+训练 batch：
+
+```python
+{
+    "roi_images": roi_images,
+    "target_corners": target_corners,
+    "target_vis": target_vis,
+}
+```
+
+loss 返回：
+
+```python
+{
+    "loss": total,
+    "loss_corner": reg_loss,
+    "loss_conf": conf_loss,
+}
+```
+
+ROI 坐标转换函数：
+
+```python
+corners_image_to_roi(...)
+corners_roi_to_image(...)
+```
+
+不要再使用旧命名：
+
+```text
+pred_corners
+pred_conf_logits
+moss_conf
+corners_roi_to_img
+pred_corners_rois
+tranform
+sequence_memory.get(..., default=...)
+```
 
 ## Repository Structure
 
@@ -24,112 +69,133 @@ video-corner-detection/
 ├── tests/
 │   └── test_train_loader.py
 ├── train.py
-├── train_loader.py
 └── video.py
 ```
 
+注意：当前项目目录中没有 `train_loader.py`。`tests/test_train_loader.py` 仍然是旧测试，应移动到 `legacy_tests/` 或加 legacy skip。
+
 ## Module Overview
 
-### `train_loader.py`
+### `roi_ops.py`
 
-仓库里目前最成熟的模块，负责：
+负责 ROI 裁剪和角点坐标系转换：
 
-- 从数据集根目录扫描样本
-- 支持 `video_corner_labels` 和 `train_pbr`
-- 生成固定长度的视频片段
-- 构建训练需要的图像与 heatmap 张量
+- `sanitize_bbox(...)`
+- `crop_and_resize_roi(...)`
+- `corners_image_to_roi(...)`
+- `corners_roi_to_image(...)`
 
-如果你要理解当前项目里最可靠的代码，优先看这个文件和对应测试。
-
-### `train.py`
-
-当前包含基础训练骨架：
-
-- `train_one_step(...)`
-- `train_one_epoch(...)`
-- `train(...)`
-
-它现在主要负责调用模型、计算损失并执行一次优化步骤，还没有包含完整的配置管理、日志、验证和 checkpoint 流程。
+仍需修正 `sanitize_bbox(...)` 中的 `dtupe` 拼写错误，并保证 bbox 能从 tensor/list/ndarray 安全转换和 clamp 到图像范围。
 
 ### `model.py`
 
-当前实验模型方向是：
+模型结构包括：
 
 - `ROIEncoder`
 - `TemporalTransformer`
 - `CornerHead`
-- `ConfidenseHead`
+- `ConfidenceHead`
 - `VideoCornerModel`
 
-设计目标是先编码 ROI，再做时序建模，最后输出角点和置信度。这个文件目前仍是实验实现，接口和细节还没有完全稳定。
+主线设计是先用 ResNet 卷积特征编码每帧 ROI，再用 Transformer 做时序建模，最后只用最后一个时间步预测：
+
+- `corners_pred`: shape `[B, 8, 2]`
+- `conf_logits_pred`: shape `[B, 8]`
+
+仍需修正 `nn.Linear(..., out_channels=...)`、`nn.Linear(in_channels=..., out_channels=...)` 和 `torchvision.models.resnet18(...)` 的调用方式。
 
 ### `loss.py`
 
-当前拆分出的损失模块包括：
+损失函数包括：
 
-- `corner_regression_loss`
-- `corner_confidence_loss`
-- `corner_loss`
+- `corner_regression_loss(...)`
+- `corner_confidence_loss(...)`
+- `corner_loss(...)`
 
-这部分表达了新训练链路的目标形式，但和模型、数据之间的接口仍在继续对齐。
+其中角点回归只在 `target_vis` 可见位置计算，置信度分支使用 `BCEWithLogitsLoss`。当前仍需修正 `corner_loss(...)` 里的未定义变量 `reg`，应使用 `reg_loss`。
 
-### `dataset.py`
+### `train.py`
 
-这个文件开始承载时序数据组织相关逻辑，例如：
+训练骨架包括：
 
-- 维护序列缓存
-- 构造推理时输入序列
-- 从 BOP 风格场景构建时序索引
-- 根据 2D 角点生成包围框
+- `train_one_step(...)`
+- `average_stats(...)`
+- `train_one_epoch(...)`
+- `train(...)`
 
-目前仍是开发中的草稿，尚未形成稳定可直接复用的数据模块。
+`train_one_epoch(...)` 应保持 `meter` 为 list-of-dicts，然后直接调用 `average_stats(meter)`。不要把它转换成 dict-of-lists，否则会和 `average_stats(...)` 的输入格式不匹配。
 
 ### `demo.py`
 
-包含简单的推理和可视化辅助函数：
+包含推理和可视化辅助函数：
 
 - `infer_one_instance(...)`
 - `draw_corners(...)`
+- `update_sequence_memory(...)`
+- `build_inference_sequence(...)`
 
-适合后续扩展成独立 demo，但现在还不是完整脚本入口。
+仍需统一使用 `corners_roi_to_image(...)`，并修正 `tranform` 拼写错误。`build_inference_sequence(...)` 中应使用 `sequence_memory.get(sequence_id, [])`。
 
-### `roi_ops.py`
+### `dataset.py`
 
-当前是预留文件，后续可用于放置 ROI 裁剪、坐标映射和图像空间变换相关操作。
+当前数据主线面向 BOP 风格目录，负责：
+
+- 扫描 `train_pbr`
+- 读取 `scene_gt.json`、`scene_camera.json`、`scene_gt_info.json`
+- 从模型 PLY 构造 3D box 角点缓存
+- 投影 3D box 角点到图像平面
+- 裁剪 ROI 序列并返回训练 batch
+
+仍需重点检查：
+
+- `torch.is_finite` 应统一为 `torch.isfinite`
+- `load_ply_vertices_ascii(...)` 里 `if not line` 应改为检查 `lines`
+- `VideoCornerDataset.__init__` 中 `dataset_root` 应先转换为 `Path`
+- `__getitem__(...)` 的 `return` 目前缩进在循环内部，会导致只返回第 1 帧 ROI，而不是完整序列
+- 当 `corners_to_xyxy(...)` 返回 `None` 时，后续 ROI 裁剪需要有明确处理策略
 
 ### `video.py`
 
-保留了一个与外部流程耦合较强的视频脚本，不是当前仓库的主开发入口。
+保留的视频脚本，不是当前主线训练入口。
 
-## Recommended Reading Order
+## Remaining Fix Checklist
 
-如果你是第一次接手这个仓库，推荐顺序：
+当前再次检查后，还需要修正：
 
-1. `README.md`
-2. `train_loader.py`
-3. `tests/test_train_loader.py`
-4. `train.py`
-5. `model.py`
-6. `dataset.py`
-7. `demo.py`
+1. `tests/test_train_loader.py` 仍引用不存在的 `train_loader.py`。
+2. `roi_ops.py` 中 `torch.as_tensor(..., dtupe=...)` 会运行时报错。
+3. `model.py` 中 `torchvision` 未按 import 名称使用，且 `nn.Linear` 参数名错误。
+4. `loss.py` 中 `total = reg + ...` 使用了未定义变量。
+5. `demo.py` 中仍调用不存在的 `corners_roi_to_img(...)`，并引用未定义的 `tranform`。
+6. `dataset.py` 中仍有运行期问题，尤其是 `line` 未定义、`dataset_root / "models"` 可能因字符串路径报错、`__getitem__` 提前 return。
+7. 需要补充新的主线测试：`test_roi_ops.py`、`test_model.py`、`test_loss.py`、`test_train.py`、`test_dataset.py`。
 
 ## Testing
 
-当前最明确的本地验证方式仍然是：
+当前可以先做基础语法检查：
+
+```bash
+python3 -m py_compile roi_ops.py model.py loss.py train.py demo.py dataset.py
+```
+
+在旧测试迁移或 skip 之前，直接运行：
 
 ```bash
 pytest -q
 ```
 
-现有测试主要覆盖 `train_loader.py` 这条数据加载链路；新拆分出来的模型、训练和推理模块还缺少系统性测试。
+大概率会因为 `tests/test_train_loader.py` 引用不存在的 `train_loader.py` 而失败。
 
-## Current Limitations
+## Recommended Reading Order
 
-- 训练入口尚未整理为可直接启动的完整脚本
-- 新拆分模块仍然有明显实验性质
-- 文档描述的是当前代码组织方向，不代表所有模块都已稳定可运行
-- 仓库当前最可靠的能力仍然是数据加载与样本组织，不是完整训练闭环
+1. `README.md`
+2. `roi_ops.py`
+3. `dataset.py`
+4. `model.py`
+5. `loss.py`
+6. `train.py`
+7. `demo.py`
 
 ## Summary
 
-这次改动的核心方向，是把原来集中在单个文件里的视频角点检测实验代码拆分成更清晰的模块边界：数据、模型、损失、训练和 demo 分开维护。当前仓库已经更接近一个可继续演化的研究原型，但离稳定训练框架还有一段整理工作。
+当前项目已经形成了 ROI 序列角点检测的模块边界：ROI 操作、数据集、模型、损失、训练和 demo 分开维护。但代码还没有进入稳定可训练状态，下一步应优先修正上面的运行期错误，再补齐主线单元测试。
