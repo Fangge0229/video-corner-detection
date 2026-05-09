@@ -8,10 +8,10 @@ def corner_regression_loss(pred_corners, target_corners, target_vis):
     """
     smooth_l1_loss = nn.SmoothL1Loss(reduction='none',beta = 2.0)
     diff = smooth_l1_loss(pred_corners,target_corners)
-    mask = target_vis.unsqueeze(-1)
+    mask = target_vis.unsqueeze(-1).float()
     diff = diff * mask
 
-    denom = torch.sum(target_vis) * 2.0 + 1e-6
+    denom = mask.sum() * 2.0 + 1e-6
     loss = torch.sum(diff) / denom
     return loss
 
@@ -20,10 +20,8 @@ def corner_confidence_loss(pred_conf_logits, target_vis):
     pred_conf_logits: [B, 8]
     target_vis:       [B, 8]
     """
-    bce_loss = nn.BCEWithLogitsLoss(reduction='none')
-    loss = bce_loss(pred_conf_logits, target_vis.float())
-    loss = loss.mean()
-    return loss
+    bce_loss = nn.BCEWithLogitsLoss(reduction='mean')
+    return bce_loss(pred_conf_logits, target_vis.float())
 
 def corner_loss(pred_corners, target_corners, pred_conf_logits, target_vis, lambda_conf=0.5):
     """
@@ -34,7 +32,7 @@ def corner_loss(pred_corners, target_corners, pred_conf_logits, target_vis, lamb
     """
     reg_loss = corner_regression_loss(pred_corners, target_corners, target_vis)
     conf_loss = corner_confidence_loss(pred_conf_logits, target_vis)
-    total = reg + lambda_conf * conf_loss
+    total = reg_loss + lambda_conf * conf_loss
     return {
         "loss": total,
         "loss_corner": reg_loss,

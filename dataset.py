@@ -74,7 +74,7 @@ def corners_to_xyxy(corners_2d, image_size=None, clamp=False):
     return: bbox (x1, y1, x2, y2)
     """
     corners_2d = torch.as_tensor(corners_2d, dtype=torch.float32).reshape(-1, 2)
-    valid_mask = torch.is_finite(corners_2d).all(dim=-1)
+    valid_mask = torch.isfinite(corners_2d).all(dim=-1)
     if valid_mask.sum() == 0:
         return None
     
@@ -102,7 +102,7 @@ def load_ply_vertices_ascii(ply_path):
         raise ValueError(f"Failed to read ply file: {ply_path}")
     
     lines = text.splitlines()
-    if not line or lines[0].strip()!="ply":
+    if not lines or lines[0].strip()!="ply":
         raise ValueError(f"Invalid ply file: {ply_path}")
     
     format_line = None
@@ -112,8 +112,6 @@ def load_ply_vertices_ascii(ply_path):
     for i, line in enumerate(lines):
         if line.startswith("format "):
             format_line = line.strip()
-        elif line.startswith("format "):
-            vertex_count = int(line.split()[-1])
         elif line.startswith("element vertex"):
             vertex_count = int(line.split()[-1])
         elif line.startswith("end_header"):
@@ -236,6 +234,14 @@ def estimate_corner_visibility(corners_2d, infos, ann_idx, minvisib_fract=1e-6):
 def list_dir(root_dir):
     return [d for d in Path(root_dir).iterdir() if d.is_dir()]
 
+def resolve_rgb_path(scene_dir, image_id):
+    rgb_dir = Path(scene_dir) / "rgb"
+    for suffix in [".png", ".jpg", ".jpeg"]:
+        image_path = rgb_dir / f"{image_id:06d}{suffix}"
+        if image_path.is_file():
+            return image_path
+    return rgb_dir / f"{image_id:06d}.png"
+
 def build_sequences_from_bop_scenes(dataset_root, model_corner_cache):
     all_sequences = {}
 
@@ -246,6 +252,7 @@ def build_sequences_from_bop_scenes(dataset_root, model_corner_cache):
         scene_gt_info = load_json(scene_dir / "scene_gt_info.json")
     
         for image_id in sorted(scene_gt.keys()):
+            image_id_int = int(image_id)
             anns = scene_gt[image_id]
             camera = scene_camera[image_id]
             infos = scene_gt_info.get(image_id, [])
@@ -260,14 +267,16 @@ def build_sequences_from_bop_scenes(dataset_root, model_corner_cache):
                     model_corner_cache = model_corner_cache
                 )
                 bbox = corners_to_xyxy(corners_2d)
+                if bbox is None:
+                    continue
                 corner_vis = estimate_corner_visibility(corners_2d, infos, ann_idx)
                 sequence_id = f"scene_{scene_dir.name}_obj_{obj_id:06d}"
 
                 record = {
                     "source_type": "bop_scene_clip",
                     "sequence_id": sequence_id,
-                    "frame_id": int(image_id),
-                    "image_path": str(scene_dir / "rgb" / f"{image_id:06d}.png"),
+                    "frame_id": image_id_int,
+                    "image_path": str(resolve_rgb_path(scene_dir, image_id_int)),
                     "bbox": bbox,
                     "corners": corners_2d,
                     "corner_vis": corner_vis,
@@ -294,7 +303,7 @@ def image_to_tensor(image):
     return tensor  
 class VideoCornerDataset(Dataset):
     def __init__(self, dataset_root, seq_len=4, roi_size=(128, 128)):
-        self.dataset_root = dataset_root
+        self.dataset_root = Path(dataset_root)
         self.seq_len = seq_len
         self.roi_size = roi_size
         
@@ -334,7 +343,7 @@ class VideoCornerDataset(Dataset):
             target_bbox = torch.as_tensor(bbox)
             target_transform = transform
         
-        return {
+      return {
         "roi_images": torch.stack(roi_images, dim=0),
         "target_corners": target_corners,
         "target_vis": target_vis,

@@ -3,15 +3,19 @@ import cv2
 import numpy as np
 def sanitize_bbox(bbox, image_shape):
     H, W = image_shape[:2]
-    bbox = torch.as_tensor(bbox, dtupe=torch.float32).reshape(4)
+    bbox = torch.as_tensor(bbox, dtype=torch.float32).reshape(4)
     x1, y1, x2, y2 = bbox.tolist()
-    #为什么这里要使用np，不是直接对int进行操作
+
     x1 = int(np.floor(max(0.0, min(x1, W - 1))))
     y1 = int(np.floor(max(0.0, min(y1, H - 1))))
     x2 = int(np.ceil(max(0.0, min(x2, W))))
     y2 = int(np.ceil(max(0.0, min(y2, H))))
-    if (x2 <= x1 or y2 <= y1):
-        raise ValueError("x2 should be larger than x1, and y2 should be larger than y1")
+
+    if x2 <= x1:
+        x2 = min(W, x1 + 1)
+    if y2 <= y1:
+        y2 = min(H, y1 + 1)
+
     return x1, y1, x2, y2
 
 def crop_and_resize_roi(image, bbox, out_size):

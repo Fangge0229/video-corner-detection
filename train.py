@@ -37,7 +37,7 @@ def average_stats(meter):
       avg[key] = sum(item[key] for item in meter) / len(meter)
     return avg
 
-def train_one_epoch(model, dataloader, optimizer, device, lambda_conf):
+def train_one_epoch(model, dataloader, optimizer, device, lambda_conf=0.5):
     meter = []
     for batch in dataloader:
         stats = train_one_step(model, batch, optimizer, device, lambda_conf=lambda_conf)
@@ -49,5 +49,4 @@ def train(model, train_loader, val_loader, optimizer, device, num_epochs, lambda
         stats = train_one_epoch(model, train_loader, optimizer, device, lambda_conf=lambda_conf)
         print(f"epoch={epoch}, stats={stats}")
     print("Training finished")
-
 

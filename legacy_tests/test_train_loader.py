@@ -5,6 +5,12 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+
+pytest.skip(
+    "legacy train_loader tests; current mainline uses ROI dataset.py",
+    allow_module_level=True,
+)
+
 from PIL import Image
 import torch
 from torch.utils.data import DataLoader

@@ -1,14 +1,14 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision.models as models
+import torchvision.models as tv_models
 
 class CornerHead(nn.Module):
     def __init__(self, in_dim=256):
         super().__init__()
         self.linear1 = nn.Linear(in_dim, in_dim)
         self.relu = nn.ReLU(inplace=True)
-        self.linear2 = nn.Linear(in_dim, out_channels=16)
+        self.linear2 = nn.Linear(in_dim, 16)
 
         nn.init.normal_(self.linear1.weight,std=0.01,mean=0.0)
         nn.init.constant_(self.linear1.bias,0)
@@ -26,7 +26,7 @@ class ConfidenceHead(nn.Module):
         super().__init__()
         self.linear1 = nn.Linear(in_dim, in_dim)
         self.relu = nn.ReLU()
-        self.linear2 = nn.Linear(in_dim, out_channels=8)
+        self.linear2 = nn.Linear(in_dim, 8)
 
         nn.init.normal_(self.linear1.weight,std=0.01,mean=0.0)
         nn.init.constant_(self.linear1.bias,0)
@@ -60,10 +60,10 @@ class TemporalTransformer(nn.Module):
 class ROIEncoder(nn.Module):
     def __init__(self, out_dim=256):
         super().__init__()
-        backbone = torchvision.models.resnet18(weights=None)
+        backbone = tv_models.resnet18(weights=None)
         self.backbone = nn.Sequential(*list(backbone.children())[:-2])
         self.pool = nn.AdaptiveAvgPool2d((1,1))
-        self.linear = nn.Linear(in_channels=512,out_channels=out_dim)
+        self.linear = nn.Linear(512,out_dim)
     
     def forward(self,x):
         feat = self.backbone(x)

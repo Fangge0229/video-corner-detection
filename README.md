@@ -63,16 +63,23 @@ video-corner-detection/
 ├── README.md
 ├── dataset.py
 ├── demo.py
+├── legacy_tests/
+│   └── test_train_loader.py
 ├── loss.py
 ├── model.py
 ├── roi_ops.py
 ├── tests/
-│   └── test_train_loader.py
+│   ├── conftest.py
+│   ├── test_dataset.py
+│   ├── test_loss.py
+│   ├── test_model.py
+│   ├── test_roi_ops.py
+│   └── test_train.py
 ├── train.py
 └── video.py
 ```
 
-注意：当前项目目录中没有 `train_loader.py`。`tests/test_train_loader.py` 仍然是旧测试，应移动到 `legacy_tests/` 或加 legacy skip。
+注意：当前项目目录中没有 `train_loader.py`。旧的 `test_train_loader.py` 已移到 `legacy_tests/`，并在模块级 skip，避免阻塞当前 ROI 主线测试。
 
 ## Module Overview
 
@@ -85,7 +92,7 @@ video-corner-detection/
 - `corners_image_to_roi(...)`
 - `corners_roi_to_image(...)`
 
-仍需修正 `sanitize_bbox(...)` 中的 `dtupe` 拼写错误，并保证 bbox 能从 tensor/list/ndarray 安全转换和 clamp 到图像范围。
+`sanitize_bbox(...)` 已按当前教程修正为安全转换和 clamp 到图像范围，避免空 crop 进入 `cv2.resize(...)`。
 
 ### `model.py`
 
@@ -102,7 +109,7 @@ video-corner-detection/
 - `corners_pred`: shape `[B, 8, 2]`
 - `conf_logits_pred`: shape `[B, 8]`
 
-仍需修正 `nn.Linear(..., out_channels=...)`、`nn.Linear(in_channels=..., out_channels=...)` 和 `torchvision.models.resnet18(...)` 的调用方式。
+`ROIEncoder` 使用 ResNet 卷积特征，`nn.Linear(...)` 和 `torchvision` 调用已经按当前教程修正。
 
 ### `loss.py`
 
@@ -112,7 +119,7 @@ video-corner-detection/
 - `corner_confidence_loss(...)`
 - `corner_loss(...)`
 
-其中角点回归只在 `target_vis` 可见位置计算，置信度分支使用 `BCEWithLogitsLoss`。当前仍需修正 `corner_loss(...)` 里的未定义变量 `reg`，应使用 `reg_loss`。
+其中角点回归只在 `target_vis` 可见位置计算，置信度分支使用 `BCEWithLogitsLoss`。`corner_loss(...)` 返回统一的 `loss`、`loss_corner`、`loss_conf`。
 
 ### `train.py`
 
@@ -123,7 +130,7 @@ video-corner-detection/
 - `train_one_epoch(...)`
 - `train(...)`
 
-`train_one_epoch(...)` 应保持 `meter` 为 list-of-dicts，然后直接调用 `average_stats(meter)`。不要把它转换成 dict-of-lists，否则会和 `average_stats(...)` 的输入格式不匹配。
+`train_one_epoch(...)` 保持 `meter` 为 list-of-dicts，然后直接调用 `average_stats(meter)`。
 
 ### `demo.py`
 
@@ -134,7 +141,7 @@ video-corner-detection/
 - `update_sequence_memory(...)`
 - `build_inference_sequence(...)`
 
-仍需统一使用 `corners_roi_to_image(...)`，并修正 `tranform` 拼写错误。`build_inference_sequence(...)` 中应使用 `sequence_memory.get(sequence_id, [])`。
+推理侧已统一使用 `corners_roi_to_image(...)`。`build_inference_sequence(...)` 中使用 `sequence_memory.get(sequence_id, [])`。
 
 ### `dataset.py`
 
@@ -146,29 +153,32 @@ video-corner-detection/
 - 投影 3D box 角点到图像平面
 - 裁剪 ROI 序列并返回训练 batch
 
-仍需重点检查：
+已经按当前教程修正：
 
-- `torch.is_finite` 应统一为 `torch.isfinite`
-- `load_ply_vertices_ascii(...)` 里 `if not line` 应改为检查 `lines`
-- `VideoCornerDataset.__init__` 中 `dataset_root` 应先转换为 `Path`
-- `__getitem__(...)` 的 `return` 目前缩进在循环内部，会导致只返回第 1 帧 ROI，而不是完整序列
-- 当 `corners_to_xyxy(...)` 返回 `None` 时，后续 ROI 裁剪需要有明确处理策略
+- `torch.is_finite` 已统一为 `torch.isfinite`
+- `load_ply_vertices_ascii(...)` 中改为检查 `lines`
+- `VideoCornerDataset.__init__` 中 `dataset_root` 已转换为 `Path`
+- `__getitem__(...)` 的 `return` 已移出循环，返回完整 ROI 序列
+- `corners_to_xyxy(...)` 返回 `None` 时跳过该 record
 
 ### `video.py`
 
 保留的视频脚本，不是当前主线训练入口。
 
-## Remaining Fix Checklist
+## Validation Status
 
-当前再次检查后，还需要修正：
+当前按 2026-05-09 教程已经修正主要运行期错误，并补了最小主线测试：
 
-1. `tests/test_train_loader.py` 仍引用不存在的 `train_loader.py`。
-2. `roi_ops.py` 中 `torch.as_tensor(..., dtupe=...)` 会运行时报错。
-3. `model.py` 中 `torchvision` 未按 import 名称使用，且 `nn.Linear` 参数名错误。
-4. `loss.py` 中 `total = reg + ...` 使用了未定义变量。
-5. `demo.py` 中仍调用不存在的 `corners_roi_to_img(...)`，并引用未定义的 `tranform`。
-6. `dataset.py` 中仍有运行期问题，尤其是 `line` 未定义、`dataset_root / "models"` 可能因字符串路径报错、`__getitem__` 提前 return。
-7. 需要补充新的主线测试：`test_roi_ops.py`、`test_model.py`、`test_loss.py`、`test_train.py`、`test_dataset.py`。
+1. `test_roi_ops.py`
+2. `test_model.py`
+3. `test_loss.py`
+4. `test_train.py`
+5. `test_dataset.py`
+
+剩余工作：
+
+1. 整理完整训练入口，包括配置、日志、验证和 checkpoint。
+2. 用真实 BOP 数据跑一次 dataset 到 train step 的端到端验证。
 
 ## Testing
 
@@ -178,13 +188,11 @@ video-corner-detection/
 python3 -m py_compile roi_ops.py model.py loss.py train.py demo.py dataset.py
 ```
 
-在旧测试迁移或 skip 之前，直接运行：
+当前旧测试已迁移到 `legacy_tests/` 并跳过。主线测试运行方式：
 
 ```bash
 pytest -q
 ```
-
-大概率会因为 `tests/test_train_loader.py` 引用不存在的 `train_loader.py` 而失败。
 
 ## Recommended Reading Order
 
@@ -198,4 +206,4 @@ pytest -q
 
 ## Summary
 
-当前项目已经形成了 ROI 序列角点检测的模块边界：ROI 操作、数据集、模型、损失、训练和 demo 分开维护。但代码还没有进入稳定可训练状态，下一步应优先修正上面的运行期错误，再补齐主线单元测试。
+当前项目已经形成了 ROI 序列角点检测的模块边界：ROI 操作、数据集、模型、损失、训练和 demo 分开维护。当前最小主线测试已经通过，下一步是整理完整训练入口，并用真实 BOP 数据做端到端验证。
