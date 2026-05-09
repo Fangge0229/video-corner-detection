@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 from roi_ops import *
 import cv2
-import dataset
+from torch.utils.data import Dataset
 
 def build_sequence_index(sequences, seq_len):
     if seq_len <= 0:
@@ -73,8 +73,8 @@ def corners_to_xyxy(corners_2d, image_size=None, clamp=False):
     clamp: bool
     return: bbox (x1, y1, x2, y2)
     """
-    valid_mask = torch.is_finite(corners_2d).all(dim=-1)
     corners_2d = torch.as_tensor(corners_2d, dtype=torch.float32).reshape(-1, 2)
+    valid_mask = torch.is_finite(corners_2d).all(dim=-1)
     if valid_mask.sum() == 0:
         return None
     
@@ -97,12 +97,12 @@ def corners_to_xyxy(corners_2d, image_size=None, clamp=False):
     
 def load_ply_vertices_ascii(ply_path):
     try:
-        text = Path(ply_path).read_txt(encoding="utf-8")
+        text = Path(ply_path).read_text(encoding="utf-8")
     except Exception as e:
         raise ValueError(f"Failed to read ply file: {ply_path}")
     
-    lines = text.strip().split()
-    if not line or lines[0].strp()!="ply":
+    lines = text.splitlines()
+    if not line or lines[0].strip()!="ply":
         raise ValueError(f"Invalid ply file: {ply_path}")
     
     format_line = None
@@ -112,11 +112,11 @@ def load_ply_vertices_ascii(ply_path):
     for i, line in enumerate(lines):
         if line.startswith("format "):
             format_line = line.strip()
-        elif line.startwith("format "):
+        elif line.startswith("format "):
             vertex_count = int(line.split()[-1])
-        elif line.startwith("element vertex"):
+        elif line.startswith("element vertex"):
             vertex_count = int(line.split()[-1])
-        elif line.startwith("end_header"):
+        elif line.startswith("end_header"):
             header_end = i
             break
     
@@ -158,7 +158,7 @@ def load_ply_corners(ply_path):
     vertices = load_ply_vertices_ascii(ply_path)
     return vertices_to_box_corners(vertices)
 
-def build_model_corner_caceh(models_dir):
+def build_model_corner_cache(models_dir):
     models_dir = Path(models_dir)
     cache = {}
 
@@ -211,8 +211,8 @@ def estimate_corner_visibility(corners_2d, infos, ann_idx, minvisib_fract=1e-6):
         corner_vis:
             Tensor[8], 每个元素是 0/1
     """
-    corners_2d = torhc.as_tensor(corners_2d, dtype=torch.float32).reshape(8, 2)
-    corner_vis = torch.is_finite(corners_2d).all(dim=-1).float()
+    corners_2d = torch.as_tensor(corners_2d, dtype=torch.float32).reshape(8, 2)
+    corner_vis = torch.isfinite(corners_2d).all(dim=-1).float()
     if infos is None or ann_idx>= len(infos):
         return corner_vis
     
@@ -252,7 +252,7 @@ def build_sequences_from_bop_scenes(dataset_root, model_corner_cache):
 
             for ann_idx, ann in enumerate(anns):
                 obj_id = ann["obj_id"]
-                corners_2d = projects_3d_box_corners(
+                corners_2d = project_3d_box_corners(
                     obj_id = obj_id,
                     R = ann["cam_R_m2c"],
                     t = ann["cam_t_m2c"],
@@ -265,7 +265,7 @@ def build_sequences_from_bop_scenes(dataset_root, model_corner_cache):
 
                 record = {
                     "source_type": "bop_scene_clip",
-                    "sequence_id": scene_dir.name,
+                    "sequence_id": sequence_id,
                     "frame_id": int(image_id),
                     "image_path": str(scene_dir / "rgb" / f"{image_id:06d}.png"),
                     "bbox": bbox,
@@ -280,7 +280,7 @@ def build_sequences_from_bop_scenes(dataset_root, model_corner_cache):
 def image_to_tensor(image):
     if image is None:
         raise ValueError("image is None")
-    if image.ndim != e or image.shape[2] != 3:
+    if image.ndim != 3 or image.shape[2] != 3:
         raise ValueError(f"expected image shape [H, W, 3], got {image.shape}")
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     image = image.astype(np.float32) / 255.0
@@ -311,7 +311,7 @@ class VideoCornerDataset(Dataset):
         return len(self.sequence_index)
 
     def __getitem__(self, idx):
-      item = self.sequencec_index[idx]
+      item = self.sequence_index[idx]
       window = item["window"]
 
       roi_images = []
@@ -325,7 +325,7 @@ class VideoCornerDataset(Dataset):
         image = cv2.imread(record["image_path"])
         bbox = record["bbox"]
         roi_img, transform = crop_and_resize_roi(image, bbox, self.roi_size)
-        roi_tensor = image_to_tensor(roi_image)
+        roi_tensor = image_to_tensor(roi_img)
         roi_images.append(roi_tensor)
         frame_ids.append(record["frame_id"])
         if i == len(window) - 1:
@@ -334,7 +334,7 @@ class VideoCornerDataset(Dataset):
             target_bbox = torch.as_tensor(bbox)
             target_transform = transform
         
-    return {
+        return {
         "roi_images": torch.stack(roi_images, dim=0),
         "target_corners": target_corners,
         "target_vis": target_vis,
@@ -342,7 +342,7 @@ class VideoCornerDataset(Dataset):
         "target_transform": target_transform,
         "sequence_id": item["sequence_id"],
         "frame_ids": frame_ids
-    }
+        }
             
 def collate_fn(batch):
     return {

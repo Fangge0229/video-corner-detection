@@ -1,5 +1,6 @@
 import cv2
 import torch
+from roi_ops import corners_roi_to_image
 
 def infer_one_instance(model, roi_seq, current_transform, device=None):
     model.eval()
@@ -14,7 +15,7 @@ def infer_one_instance(model, roi_seq, current_transform, device=None):
     pred_corners_roi = pred["corners_pred"][0]
     pred_conf = torch.sigmoid(pred["conf_logits_pred"][0])
 
-    pred_corners_img = corners_roi_to_img(pred_corners_rois, current_transform)
+    pred_corners_img = corners_roi_to_img(pred_corners_roi, current_transform)
     return {
         "corners_roi":pred_corners_roi,
         "corners_img":pred_corners_img,
@@ -35,7 +36,7 @@ def update_sequence_memory(sequence_memory, sequence_id, roi_tensor, transform, 
         sequence_memory[sequence_id] = []
     sequence_memory[sequence_id].append({
         "roi_image": roi_tensor,
-        "tranform": tranform
+        "transform": tranform
     })
     
     if len(sequence_memory[sequence_id]) > max_len:
@@ -43,7 +44,7 @@ def update_sequence_memory(sequence_memory, sequence_id, roi_tensor, transform, 
     return sequence_memory
 
 def build_inference_sequence(sequence_memory, sequence_roi, sequence_id, current_roi, seq_len):
-    history = sequence_memory.get(sequence_id, default=[])
+    history = sequence_memory.get(sequence_id, [])
     seq = [item["roi_image"] for item in history]
     seq.append(current_roi)
 
