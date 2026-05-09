@@ -2,7 +2,7 @@
 
 `video-corner-detection` 是一个面向视频 ROI 序列的 3D box 角点检测实验项目。当前主线目标是：从 BOP 风格数据集中构造连续 ROI 序列，模型只使用最后一个时间步输出 8 个角点坐标和 8 个角点可见性 logits。
 
-这个仓库仍是整理中的研究代码，不是已经稳定封装好的训练框架。
+这个仓库仍是整理中的研究代码，不是已经稳定封装好的训练框架。当前已经具备最小训练闭环：BOP 风格数据 -> ROI 序列 -> 模型 forward -> loss -> backward -> optimizer step。
 
 ## Current Mainline Contract
 
@@ -152,6 +152,7 @@ video-corner-detection/
 - 从模型 PLY 构造 3D box 角点缓存
 - 投影 3D box 角点到图像平面
 - 裁剪 ROI 序列并返回训练 batch
+- 自动解析 `rgb/000000.png`、`rgb/000000.jpg`、`rgb/000000.jpeg`
 
 已经按当前教程修正：
 
@@ -160,6 +161,7 @@ video-corner-detection/
 - `VideoCornerDataset.__init__` 中 `dataset_root` 已转换为 `Path`
 - `__getitem__(...)` 的 `return` 已移出循环，返回完整 ROI 序列
 - `corners_to_xyxy(...)` 返回 `None` 时跳过该 record
+- `resolve_rgb_path(...)` 支持 `.jpg`，适配 `dtu106-demo-bin-picking-clip`
 
 ### `video.py`
 
@@ -175,10 +177,35 @@ video-corner-detection/
 4. `test_train.py`
 5. `test_dataset.py`
 
+本地验证结果：
+
+```text
+pytest -q
+8 passed, 1 skipped
+```
+
+远程数据验证：
+
+```text
+data root: /nas2/home/qianqian/projects/HCCEPose/dtu106-demo-bin-picking-clip
+frames: 24
+annotations: 24
+obj_ids: [1]
+rgb suffix: .jpg
+```
+
+已用该数据完成一次只读最小训练验证：
+
+```text
+BOP JSON + PLY + JPG -> ROI sequence -> model -> loss -> backward -> optimizer.step
+REMOTE_DTU106_TRAIN_STEP_OK
+```
+
 剩余工作：
 
 1. 整理完整训练入口，包括配置、日志、验证和 checkpoint。
-2. 用真实 BOP 数据跑一次 dataset 到 train step 的端到端验证。
+2. 在远程项目目录同步最新代码后，用项目自身 `dataset.py/train.py` 直接跑 dtu106 验证。
+3. 远程 `video` conda 环境当前缺少 `cv2` 和 `pytest`，如要直接运行项目测试，需要安装 `opencv-python` 和 `pytest`。
 
 ## Testing
 
@@ -193,6 +220,41 @@ python3 -m py_compile roi_ops.py model.py loss.py train.py demo.py dataset.py
 ```bash
 pytest -q
 ```
+
+当前测试覆盖：
+
+- ROI bbox sanitize、裁剪和坐标往返
+- 模型输出 key 和 shape
+- loss 返回 key 和 backward
+- `train_one_step(...)` 最小训练步
+- BOP 风格 dataset 样本构造、`.jpg` RGB 读取和 collate
+
+## Remote dtu106 Check
+
+远程可用于训练验证的数据目录：
+
+```text
+/nas2/home/qianqian/projects/HCCEPose/dtu106-demo-bin-picking-clip
+```
+
+该数据集是 BOP 风格 clip 数据，不是离散图片目录。`HCCEPose-clip` 为空目录，不作为训练数据。
+
+远程环境建议：
+
+```bash
+conda activate video
+pip install opencv-python pytest
+```
+
+然后在远程项目目录运行：
+
+```bash
+cd /nas2/home/qianqian/projects/video_corner/video-corner-detection
+python -m py_compile roi_ops.py model.py loss.py train.py demo.py dataset.py
+pytest -q
+```
+
+最小训练验证入口可以复用 `tests/test_dataset.py` 和 `tests/test_train.py` 的构造方式，或运行单 batch 脚本检查是否输出训练 stats。
 
 ## Recommended Reading Order
 
