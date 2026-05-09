@@ -6,9 +6,9 @@ import torchvision.models as models
 class CornerHead(nn.Module):
     def __init__(self, in_dim=256):
         super().__init__()
-        self.linear1 = nn.Linear(in_channels=256,out_channels=128)
+        self.linear1 = nn.Linear(in_dim, in_dim)
         self.relu = nn.ReLU(inplace=True)
-        self.linear2 = nn.Linear(in_channels=128,out_channels=16)
+        self.linear2 = nn.Linear(in_dim, out_channels=16)
 
         nn.init.normal_(self.linear1.weight,std=0.01,mean=0.0)
         nn.init.constant_(self.linear1.bias,0)
@@ -23,9 +23,10 @@ class CornerHead(nn.Module):
 
 class ConfidenceHead(nn.Module):
     def __init__(self, in_dim=256):
-        self.linear1 = nn.Linear(in_channels=256,out_channels=128)
+        super().__init__()
+        self.linear1 = nn.Linear(in_dim, in_dim)
         self.relu = nn.ReLU()
-        self.linear2 = nn.Linear(in_channels=128,out_channels=1)
+        self.linear2 = nn.Linear(in_dim, out_channels=8)
 
         nn.init.normal_(self.linear1.weight,std=0.01,mean=0.0)
         nn.init.constant_(self.linear1.bias,0)
@@ -59,8 +60,8 @@ class TemporalTransformer(nn.Module):
 class ROIEncoder(nn.Module):
     def __init__(self, out_dim=256):
         super().__init__()
-        backbone = torchvision.models.resnet18(weights=weight)
-        self.backbone = models.resnet18(pretrained=True)
+        backbone = torchvision.models.resnet18(weights=None)
+        self.backbone = nn.Sequential(*list(backbone.children())[:-2])
         self.pool = nn.AdaptiveAvgPool2d((1,1))
         self.linear = nn.Linear(in_channels=512,out_channels=out_dim)
     
@@ -77,7 +78,7 @@ class VideoCornerModel(nn.Module):
         self.roi_encoder = ROIEncoder(out_dim=feat_dim)
         self.temporal_transformer = TemporalTransformer(d_model=feat_dim,nhead=nhead,num_layers=num_layers,max_len=max_len)
         self.corner_head = CornerHead(in_dim=feat_dim)
-        self.confidence_head = ConfidenseHead(in_dim=feat_dim)
+        self.confidence_head = ConfidenceHead(in_dim=feat_dim)
     
     def forward(self,x):
         B,T,C,H,W = x.shape
@@ -85,8 +86,9 @@ class VideoCornerModel(nn.Module):
         feat = self.roi_encoder(x)
         feat = feat.view(B,T,-1)
         feat = self.temporal_transformer(feat)
-        corner_pred = self.corner_head(feat)
-        confidence_pred = self.confidence_head(feat)
+        last_feat = feat[:, -1, :]
+        corner_pred = self.corner_head(last_feat)
+        confidence_pred = self.confidence_head(last_feat)
         return{
             "corners_pred": corner_pred,
             "conf_logits_pred": confidence_pred

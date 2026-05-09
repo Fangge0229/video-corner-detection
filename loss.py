@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-def corner_regression_loss(pred, target, target_vis):
+def corner_regression_loss(pred_corners, target_corners, target_vis):
     """
     pred_corners:   [B, 8, 2]
     target_corners: [B, 8, 2]
@@ -34,9 +34,9 @@ def corner_loss(pred_corners, target_corners, pred_conf_logits, target_vis, lamb
     """
     reg_loss = corner_regression_loss(pred_corners, target_corners, target_vis)
     conf_loss = corner_confidence_loss(pred_conf_logits, target_vis)
-    total = reg + lambda_conf * conf
+    total = reg + lambda_conf * conf_loss
     return {
         "loss": total,
         "loss_corner": reg_loss,
-        "moss_conf": conf_loss
+        "loss_conf": conf_loss
     }
