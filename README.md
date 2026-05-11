@@ -4,6 +4,135 @@
 
 这个仓库仍是整理中的研究代码，不是已经稳定封装好的训练框架。当前已经具备最小训练闭环：BOP 风格数据 -> ROI 序列 -> 模型 forward -> loss -> backward -> optimizer step。
 
+## Detailed DTU106 Usage
+
+This project consumes a BOP-style dataset root. For the DTU106 smoke test produced by `HCCEPose-clip`, the remote training path is expected to be:
+
+```text
+/nas2/home/qianqian/projects/HCCEPose/dtu106-demo-bin-picking-clip
+```
+
+The dataset loader currently uses these files directly:
+
+```text
+dataset_root/
+|-- models/
+|   |-- models_info.json
+|   `-- obj_000001.ply
+`-- train_pbr/
+    `-- 000000/
+        |-- scene_camera.json
+        |-- scene_gt.json
+        |-- scene_gt_info.json
+        `-- rgb/
+            |-- 000000.jpg
+            `-- ...
+```
+
+`video_corner_labels/annotations.json` and `video_corner_labels/clips.json` may exist beside this data, but the current `VideoCornerDataset` path rebuilds corner targets from BOP scene JSON plus `models/obj_*.ply`. Make sure `models` is a real directory on the training machine.
+
+### Create a Fresh Environment
+
+Use a separate environment for this project. The commands below use CPU PyTorch for smoke tests. On the real training server, install the CUDA build that matches the server driver if GPU training is required.
+
+```bash
+conda create -n video_corner_dtu106 python=3.10 -y
+conda activate video_corner_dtu106
+
+# CPU smoke-test build:
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+pip install opencv-python pytest numpy
+```
+
+For a CUDA environment, replace the PyTorch install command with the correct command from the PyTorch selector, then keep the `opencv-python pytest numpy` install.
+
+### Check the Project
+
+```bash
+conda activate video_corner_dtu106
+cd /nas2/home/qianqian/projects/video_corner/video-corner-detection
+
+python -m py_compile roi_ops.py model.py loss.py train.py demo.py dataset.py
+pytest -q
+```
+
+Current expected smoke-test result:
+
+```text
+8 passed, 1 skipped
+```
+
+### Check DTU106 Dataset Loading
+
+```bash
+python - <<'PY'
+from pathlib import Path
+from dataset import VideoCornerDataset
+root = Path('/nas2/home/qianqian/projects/HCCEPose/dtu106-demo-bin-picking-clip')
+dataset = VideoCornerDataset(str(root), seq_len=4, roi_size=(64, 64))
+print('sequence_count', len(dataset.all_sequences))
+print('window_count', len(dataset))
+sample = dataset[0]
+print('sequence_id', sample['sequence_id'])
+print('frame_ids', sample['frame_ids'])
+print('roi_images', tuple(sample['roi_images'].shape))
+print('target_corners', tuple(sample['target_corners'].shape))
+print('target_vis', sample['target_vis'].tolist())
+PY
+```
+
+Expected values for the current DTU106 clip:
+
+```text
+sequence_count 1
+window_count 21
+sequence_id scene_000000_obj_000001
+frame_ids [0, 1, 2, 3]
+roi_images (4, 3, 64, 64)
+target_corners (8, 2)
+```
+
+### Run One Training Step on DTU106
+
+This verifies the full minimum path: BOP JSON + PLY + JPG -> ROI sequence -> model -> loss -> backward -> optimizer step.
+
+```bash
+python - <<'PY'
+from pathlib import Path
+import torch
+from torch.utils.data import DataLoader
+from dataset import VideoCornerDataset, collate_fn
+from model import VideoCornerModel
+from train import train_one_step
+
+root = Path('/nas2/home/qianqian/projects/HCCEPose/dtu106-demo-bin-picking-clip')
+dataset = VideoCornerDataset(str(root), seq_len=4, roi_size=(64, 64))
+if len(dataset) == 0:
+    raise SystemExit('No training windows were built from DTU106 clip')
+loader = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
+batch = next(iter(loader))
+model = VideoCornerModel(feat_dim=32, nhead=4, num_layers=1, max_len=4)
+optimizer = torch.optim.SGD(model.parameters(), lr=1e-4)
+stats = train_one_step(model, batch, optimizer, torch.device('cpu'))
+print('train_step_stats', stats)
+print('DTU106_TRAIN_STEP_OK')
+PY
+```
+
+Expected terminal marker:
+
+```text
+DTU106_TRAIN_STEP_OK
+```
+
+### Troubleshooting
+
+- `FileNotFoundError: No obj_*.ply files found`: fix `dataset_root/models`; it must contain `obj_000001.ply`, not a broken symlink.
+- `cv2` import fails: install `opencv-python` in the active conda environment.
+- Zero dataset windows: check that `train_pbr/*/scene_gt.json`, `scene_camera.json`, and `scene_gt_info.json` exist and that the scene contains at least `seq_len` frames for the same object id.
+- Empty or invalid ROI crops: inspect `scene_gt_info.json` boxes and verify that RGB paths resolve under `train_pbr/<scene_id>/rgb`.
+- GPU training: move the model and batch tensors to `cuda` after installing a CUDA-compatible PyTorch build; the current smoke-test snippets intentionally use CPU.
+
 ## Current Mainline Contract
 
 当前代码应统一使用下面的接口命名。
